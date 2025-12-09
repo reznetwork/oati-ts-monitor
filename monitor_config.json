@@ -1,0 +1,97 @@
+{
+  "pymodbus": {
+    "port": 502,
+    "timeout": 2.5,
+    "unitCandidates": [
+      1,
+      255,
+      0
+    ],
+    "coilsFallback": true
+  },
+  "vehicles": [
+    {
+      "name": "Tractor A",
+      "controllers": [
+        {
+          "name": "MB_IO_1",
+          "model": "ICPDAS ET-7002",
+          "host": "172.16.102.4",
+          "base": 10000,
+          "points": [
+            {
+              "ref": 10001,
+              "label": "Ручник",
+              "invert": false,
+              "style": "handbrake"
+            },
+            {
+              "ref": 10002,
+              "label": "Ремень",
+              "invert": true,
+              "style": "seatbelt"
+            },
+            {
+              "ref": 10003,
+              "label": "Двигатель",
+              "invert": true,
+              "style": "engine"
+            }
+          ]
+        },
+        {
+          "name": "MB_IO_2",
+          "model": "ICPDAS ET-7051",
+          "host": "172.16.102.5",
+          "base": 10000,
+          "points": [
+            {
+              "ref": 10000,
+              "label": "тормоз"
+            },
+            {
+              "ref": 10002,
+              "label": "левый поворотник",
+              "style": "indicator"
+            },
+            {
+              "ref": 10003,
+              "label": "правый поворотник",
+              "style": "indicator"
+            },
+            {
+              "ref": 10005,
+              "label": "ближний свет"
+            },
+            {
+              "ref": 10009,
+              "label": "Гудок"
+            }
+          ]
+        },
+        {
+          "name": "MB_IO_3",
+          "host": "172.16.102.8",
+          "base": 10001,
+          "gear_points": {
+            "10001": "N",
+            "10002": "F1",
+            "10003": "F2",
+            "10004": "F3",
+            "10005": "F4",
+            "10006": "F5",
+            "10007": "F6",
+            "10008": "F7",
+            "10009": "F8",
+            "10010": "F9",
+            "10021": "R1",
+            "10022": "R2"
+          },
+          "extra_points": {
+            "10023": "&&"
+          }
+        }
+      ]
+    }
+  ]
+}
