@@ -1159,7 +1159,8 @@ class TUI:
     def render_gnss(self, row: int, snap: dict) -> int:
         gnss = snap.get("gnss")
         if not gnss:
-            return row
+            addstr_clip(self.stdscr, row, 0, "GNSS: no data", curses.color_pair(Colors.RED))
+            return row + 1
         age = time.time() - gnss.get('ts', time.time())
         sats_txt = str(gnss.get('sats')) if gnss.get('sats') is not None else "--"
         hdop_val = gnss.get('hdop')
@@ -1200,6 +1201,12 @@ class TUI:
             addstr_clip(self.stdscr, row, 0, f"WiFi {iface}: {status}", curses.color_pair(Colors.RED))
         return row + 1
 
+    def draw_section_divider(self, row: int, title: str) -> int:
+        label = f"[ {title} ]"
+        filler = "─" * max(0, curses.COLS - len(label) - 1)
+        addstr_clip(self.stdscr, row, 0, f"{label} {filler}", curses.color_pair(Colors.WHITE) | curses.A_BOLD)
+        return row + 1
+
     def loop(self):
         try:
             while True:
@@ -1217,12 +1224,15 @@ class TUI:
                 row = self.draw_header(row, snap)
                 row = self.draw_status_line(row, snap)
                 row = self.draw_debug(row, snap)
+                row = self.draw_section_divider(row, "Modbus data")
                 addstr_clip(self.stdscr, row, 0, f"Polling {int(self.args.poll*1000)} ms | Unit IDs {self.args.unit_candidates} | Coils fallback: {self.args.coils} | pymodbus {PYMODBUS_VERSION}", curses.color_pair(Colors.MAGENTA))
                 row += 1
                 for cfg in self.vehicle.controllers:
                     row = self.render_controller_points(row, cfg, snap)
                 row = self.render_display_latency(row, snap)
+                row = self.draw_section_divider(row, "GNSS data")
                 row = self.render_gnss(row, snap)
+                row = self.draw_section_divider(row, "WiFi data")
                 row = self.render_wifi(row, snap)
                 self.stdscr.refresh()
 
