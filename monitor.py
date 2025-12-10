@@ -248,19 +248,21 @@ def logical_state(invert: bool, raw: Optional[bool]) -> Optional[bool]:
         return None
     return (not raw) if invert else raw
 
-def check_tcp(host: str, port: int, timeout: float) -> Tuple[bool, Optional[str]]:
+def check_tcp(host: str, port: int, timeout: float) -> Tuple[bool, Optional[float], Optional[str]]:
+    start = time.perf_counter()
     try:
         with socket.create_connection((host, port), timeout=timeout):
-            return True, None
+            end = time.perf_counter()
+            return True, (end - start) * 1000.0, None
     except Exception as e:
         etxt = f"{e.__class__.__name__}: {e}"
         if isinstance(e, TimeoutError):
-            return False, "timeout"
+            return False, None, "timeout"
         if isinstance(e, ConnectionRefusedError):
-            return False, "refused"
+            return False, None, "refused"
         if isinstance(e, OSError) and "No route" in str(e):
-            return False, "no route"
-        return False, etxt
+            return False, None, "no route"
+        return False, None, etxt
 
 # ---------------- Pymodbus call helper ----------------
 def call_bits(method, address: int, count: int, unit: int):
@@ -449,7 +451,10 @@ class TUI:
         self.clients: Dict[str, MBClient] = {}
         self.status: Dict[str, str] = {}
         self.debug_msgs: Dict[str, str] = {}
+        self.latency: Dict[str, Optional[float]] = {}
         self.show_debug = False
+        self.last_poll_time = 0.0
+        self.last_net_check_time = 0.0
 
         curses.curs_set(0)
         self.stdscr.nodelay(True)
@@ -465,6 +470,10 @@ class TUI:
         self.create_clients()
 
     def create_clients(self):
+        self.clients = {}
+        self.status = {}
+        self.debug_msgs = {}
+        self.latency = {}
         for cfg in self.vehicle.controllers:
             mc = MBClient(
                 host=cfg.host,
@@ -474,13 +483,24 @@ class TUI:
                 use_coils_fallback=self.args.coils,
             )
             self.clients[cfg.name] = mc
-            ok, why = check_tcp(cfg.host, self.args.port, self.args.timeout)
+        self.refresh_tcp_status()
+        self.last_net_check_time = time.monotonic()
+        self.last_poll_time = 0.0
+
+    def refresh_tcp_status(self):
+        for cfg in self.vehicle.controllers:
+            ok, latency_ms, why = check_tcp(cfg.host, self.args.port, self.args.timeout)
+            self.latency[cfg.name] = latency_ms
             if not ok:
                 self.status[cfg.name] = f"TCP {why or 'fail'}"
                 self.debug_msgs[cfg.name] = f"TCP check: {why}"
             else:
-                self.status[cfg.name] = "OK"
-                self.debug_msgs[cfg.name] = "TCP ok"
+                if self.status.get(cfg.name, "") in ("", None) or self.status.get(cfg.name, "").startswith("TCP "):
+                    self.status[cfg.name] = "OK"
+                if latency_ms is not None:
+                    self.debug_msgs[cfg.name] = f"TCP ok ({latency_ms:.1f} ms)"
+                else:
+                    self.debug_msgs[cfg.name] = "TCP ok"
 
     def draw_header(self, row: int) -> int:
         title = f"Vehicle Modbus Monitor — {self.vehicle.name} (q: quit, r: reconnect, d: debug)"
@@ -493,7 +513,9 @@ class TUI:
             name = cfg.name
             st = self.status.get(name, '—')
             col = curses.color_pair(Colors.GREEN) if st == 'OK' else curses.color_pair(Colors.RED)
-            chunk = f"{name}:{st}  "
+            latency_ms = self.latency.get(name)
+            latency_txt = f"{latency_ms:.1f} ms" if latency_ms is not None else "-- ms"
+            chunk = f"{name}:{st} {cfg.host} {latency_txt}  "
             addstr_clip(self.stdscr, row, x, chunk, col | curses.A_BOLD)
             x += len(chunk)
         return row + 1
@@ -607,6 +629,16 @@ class TUI:
             except Exception:
                 pass
 
+            now = time.monotonic()
+            if now - self.last_net_check_time >= self.args.poll_net:
+                self.refresh_tcp_status()
+                self.last_net_check_time = now
+
+            if now - self.last_poll_time < self.args.poll:
+                time.sleep(0.05)
+                continue
+            self.last_poll_time = now
+
             self.stdscr.erase()
             row = 0
             row = self.draw_header(row)
@@ -620,7 +652,6 @@ class TUI:
 
             addstr_clip(self.stdscr, row, 0, f"Polling {int(self.args.poll*1000)} ms | Unit IDs {self.args.unit_candidates} | Coils fallback: {self.args.coils} | pymodbus {PYMODBUS_VERSION}", curses.color_pair(Colors.MAGENTA))
             self.stdscr.refresh()
-            time.sleep(self.args.poll)
 
 # ---------------- Diagnostics ----------------
 def run_diag(args, appcfg: AppCfg, vehicle: VehicleCfg):
@@ -629,9 +660,10 @@ def run_diag(args, appcfg: AppCfg, vehicle: VehicleCfg):
 
     for cfg in vehicle.controllers:
         print(f"\n{cfg.name} @ {cfg.host}:{args.port}")
-        ok, why = check_tcp(cfg.host, args.port, args.timeout)
+        ok, latency_ms, why = check_tcp(cfg.host, args.port, args.timeout)
         if ok:
-            print(" TCP: reachable ✓")
+            lat_txt = f"{latency_ms:.1f} ms" if latency_ms is not None else "-- ms"
+            print(f" TCP: reachable ✓ ({lat_txt})")
         else:
             print(f" TCP: unreachable ✗  ({why})")
             continue
@@ -667,9 +699,13 @@ def parse_args():
     ap.add_argument("--unit-candidates", type=int, nargs="*", default=DEFAULT_UNIT_CANDIDATES, help="Unit ids to try (default 1 255 0)")
     ap.add_argument("--no-coils", dest="coils", action="store_false", help="Disable fallback to read_coils if DI fails")
     ap.add_argument("--poll", type=float, default=DEFAULT_POLL_INTERVAL_SEC, help="Polling interval seconds (default 0.35)")
+    ap.add_argument("--poll-net", type=float, default=None, help="Network/latency polling interval seconds (default --poll)")
     ap.add_argument("--diag", action="store_true", help="Run diagnostics and exit")
     ap.add_argument("--verbose", action="store_true", help="Enable verbose pymodbus logging (stdout/stderr)")
     args = ap.parse_args()
+
+    if args.poll_net is None:
+        args.poll_net = args.poll
 
     return args
 
