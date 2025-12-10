@@ -697,36 +697,23 @@ class MBClient:
             if not ok:
                 return out
 
-        addresses = sorted([ref - base for ref in refs])
-        batches: List[List[int]] = []
-        current_batch: List[int] = [addresses[0]]
-
-        for addr in addresses[1:]:
-            if addr - current_batch[0] >= 64:
-                batches.append(current_batch)
-                current_batch = [addr]
-            else:
-                current_batch.append(addr)
-        batches.append(current_batch)
-
-        for batch in batches:
-            start = batch[0]
-            count = batch[-1] - start + 1
+        start, count = refs_to_block(refs, base)
+        bits = self._read_bits(start, count, self.unit, self.func)  # type: ignore
+        if bits is None:
+            # reconnect once and retry
+            self.client.close()
+            self.connected = False
+            if not self.connect():
+                return out
             bits = self._read_bits(start, count, self.unit, self.func)  # type: ignore
             if bits is None:
-                # reconnect once and retry
-                self.client.close()
-                self.connected = False
-                if not self.connect():
-                    return out
-                bits = self._read_bits(start, count, self.unit, self.func)  # type: ignore
-                if bits is None:
-                    return out
+                return out
 
-            for addr in batch:
-                idx = addr - start
-                if 0 <= idx < len(bits):
-                    out[addr + base] = bool(bits[idx])
+        for ref in refs:
+            addr = ref - base
+            idx = addr - start
+            if 0 <= idx < len(bits):
+                out[ref] = bool(bits[idx])
         return out
 
 # ---------------- GNSS client ----------------
