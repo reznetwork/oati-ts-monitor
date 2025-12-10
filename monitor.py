@@ -72,6 +72,7 @@ JSON config (save as monitor_config.json)
 }
 
 """
+import asyncio
 import json
 import time
 import curses
@@ -85,7 +86,11 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional, Any
 import threading
+import json as jsonlib
+from pathlib import Path
 
+import jinja2
+from aiohttp import WSMsgType, web
 from pymodbus.client import ModbusTcpClient
 from pymodbus import __version__ as PYMODBUS_VERSION
 
@@ -134,6 +139,69 @@ class AppCfg:
     wifi_refresh: Optional[float] = None
     display_latency_hosts: List[Tuple[str, str, int]] = field(default_factory=list)
     vehicles: List[VehicleCfg] = field(default_factory=list)
+
+
+class AppState:
+    def __init__(self, vehicle: VehicleCfg, appcfg: AppCfg):
+        self.vehicle = vehicle
+        self.appcfg = appcfg
+        self.lock = threading.RLock()
+        self.update_event = threading.Event()
+        self.controllers: Dict[str, Dict[str, Any]] = {}
+        self.gnss: Optional[Dict[str, Any]] = None
+        self.wifi: Optional[Dict[str, Any]] = None
+        self.display_latency: Dict[str, Dict[str, Optional[str]]] = {}
+        self.last_update: float = 0.0
+
+        for cfg in self.vehicle.controllers:
+            self.controllers[cfg.name] = {
+                "host": cfg.host,
+                "base": cfg.base,
+                "model": cfg.model,
+                "status": "INIT",
+                "latency": None,
+                "debug": "",
+                "points": {},
+                "gears": {},
+                "extra": {},
+            }
+
+    def snapshot(self) -> Dict[str, Any]:
+        with self.lock:
+            return {
+                "controllers": jsonlib.loads(jsonlib.dumps(self.controllers)),
+                "gnss": jsonlib.loads(jsonlib.dumps(self.gnss)) if self.gnss is not None else None,
+                "wifi": jsonlib.loads(jsonlib.dumps(self.wifi)) if self.wifi is not None else None,
+                "display_latency": jsonlib.loads(jsonlib.dumps(self.display_latency)),
+                "last_update": self.last_update,
+                "vehicle": self.vehicle.name,
+            }
+
+    def set_controller(self, name: str, **kwargs):
+        with self.lock:
+            if name not in self.controllers:
+                self.controllers[name] = {}
+            self.controllers[name].update(kwargs)
+            self.last_update = time.time()
+            self.update_event.set()
+
+    def set_gnss(self, snap: Optional[Dict[str, Any]]):
+        with self.lock:
+            self.gnss = snap
+            self.last_update = time.time()
+            self.update_event.set()
+
+    def set_wifi(self, snap: Optional[Dict[str, Any]]):
+        with self.lock:
+            self.wifi = snap
+            self.last_update = time.time()
+            self.update_event.set()
+
+    def set_display_latency(self, data: Dict[str, Dict[str, Optional[str]]]):
+        with self.lock:
+            self.display_latency = data
+            self.last_update = time.time()
+            self.update_event.set()
 
 # ---------------- Config loader ----------------
 def _as_int_keys(d: Dict[str, Any]) -> Dict[int, str]:
@@ -611,8 +679,151 @@ class GNSSClient:
                     'hdop': hdop,
                     'lat': lat,
                     'lon': lon,
-                    'ts': time.monotonic(),
+                    'ts': time.time(),
                 }
+
+
+class Poller:
+    def __init__(self, args, appcfg: AppCfg, vehicle: VehicleCfg, state: AppState):
+        self.args = args
+        self.appcfg = appcfg
+        self.vehicle = vehicle
+        self.state = state
+        self.stop_event = threading.Event()
+        self.reconnect_event = threading.Event()
+        self.clients: Dict[str, MBClient] = {}
+        self.latency: Dict[str, Optional[float]] = {}
+        self.status: Dict[str, str] = {}
+        self.debug_msgs: Dict[str, str] = {}
+        self.last_net_check_time = 0.0
+        self.last_wifi_check_time = 0.0
+        self.gnss_client: Optional[GNSSClient] = None
+        self.wifi_refresh_interval = self.appcfg.wifi_refresh if self.appcfg.wifi_refresh is not None else self.args.poll * 2
+        self.poll_net_interval = self.args.poll_net
+        self._build_clients()
+
+        if self.appcfg.gnss_host and self.appcfg.gnss_port:
+            self.gnss_client = GNSSClient(self.appcfg.gnss_host, int(self.appcfg.gnss_port))
+            self.gnss_client.start()
+
+    def _build_clients(self):
+        self.clients = {}
+        self.latency = {}
+        self.status = {}
+        self.debug_msgs = {}
+        for cfg in self.vehicle.controllers:
+            self.clients[cfg.name] = MBClient(
+                host=cfg.host,
+                port=self.args.port,
+                timeout=self.args.timeout,
+                unit_candidates=self.args.unit_candidates,
+                use_coils_fallback=self.args.coils,
+            )
+
+    def request_reconnect(self):
+        self.reconnect_event.set()
+
+    def refresh_tcp_status(self):
+        for cfg in self.vehicle.controllers:
+            ok, latency_ms, why = check_tcp(cfg.host, self.args.port, self.args.timeout)
+            self.latency[cfg.name] = latency_ms
+            if not ok:
+                self.status[cfg.name] = f"TCP {why or 'fail'}"
+                self.debug_msgs[cfg.name] = f"TCP check: {why}"
+            else:
+                self.status[cfg.name] = "OK"
+                self.debug_msgs[cfg.name] = f"TCP ok ({latency_ms:.1f} ms)" if latency_ms is not None else "TCP ok"
+            self.state.set_controller(cfg.name, latency=latency_ms, status=self.status[cfg.name], debug=self.debug_msgs.get(cfg.name, ""))
+
+        display_latency: Dict[str, Dict[str, Optional[str]]] = {}
+        for name, host, port in self.appcfg.display_latency_hosts:
+            ok, latency_ms, why = check_tcp(host, port, self.args.timeout)
+            display_latency[name] = {
+                "latency": f"{latency_ms:.1f} ms" if latency_ms is not None else "-- ms",
+                "status": "OK" if ok else f"TCP {why or 'fail'}",
+                "host": host,
+                "port": str(port),
+            }
+        self.state.set_display_latency(display_latency)
+
+    def poll_controller(self, cfg: ControllerCfg):
+        client = self.clients[cfg.name]
+        points = cfg.points
+        point_refs = [p.ref for p in points]
+        point_values = client.read_refs(cfg.base, point_refs) if points else {}
+        gear_refs = sorted(cfg.gear_points.keys())
+        gear_values = client.read_refs(cfg.base, gear_refs) if gear_refs else {}
+        extra_refs = sorted(cfg.extra_points.keys())
+        extra_values = client.read_refs(cfg.base, extra_refs) if extra_refs else {}
+
+        status = self.status.get(cfg.name, "OK")
+        debug = self.debug_msgs.get(cfg.name, "")
+
+        if points and all(point_values.get(r) is None for r in point_refs):
+            status = status if status.startswith("TCP") else "READ ERR"
+            debug = client.last_error or debug
+        else:
+            if not status.startswith("TCP"):
+                status = "OK"
+
+        point_payload = {str(p.ref): logical_state(p.invert, point_values.get(p.ref)) for p in points}
+        gear_payload = {str(ref): gear_values.get(ref) for ref in gear_refs}
+        extra_payload = {str(ref): extra_values.get(ref) for ref in extra_refs}
+
+        self.state.set_controller(
+            cfg.name,
+            points=point_payload,
+            gears=gear_payload,
+            extra=extra_payload,
+            status=status,
+            debug=debug,
+            latency=self.latency.get(cfg.name),
+        )
+
+    def refresh_gnss(self):
+        if not self.gnss_client:
+            return
+        self.state.set_gnss(self.gnss_client.snapshot())
+
+    def refresh_wifi(self):
+        if not self.appcfg.wifi_iface:
+            return
+        self.state.set_wifi(get_wifi_status(self.appcfg.wifi_iface))
+
+    def run_once(self):
+        now = time.monotonic()
+        if self.reconnect_event.is_set():
+            self._build_clients()
+            self.reconnect_event.clear()
+        if now - self.last_net_check_time >= self.poll_net_interval:
+            self.refresh_tcp_status()
+            self.last_net_check_time = now
+
+        for cfg in self.vehicle.controllers:
+            self.poll_controller(cfg)
+
+        if now - self.last_wifi_check_time >= self.wifi_refresh_interval:
+            self.refresh_wifi()
+            self.last_wifi_check_time = now
+
+        self.refresh_gnss()
+
+    def start(self):
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread.start()
+
+    def _loop(self):
+        while not self.stop_event.is_set():
+            self.run_once()
+            if self.stop_event.wait(self.args.poll):
+                break
+
+    def stop(self):
+        self.stop_event.set()
+        if self.gnss_client:
+            self.gnss_client.stop()
+        if getattr(self, "thread", None):
+            self.thread.join(timeout=2)
 
 # ---------------- UI helpers ----------------
 def addstr_clip(win, y: int, x: int, text: str, attr: int = 0):
@@ -665,23 +876,14 @@ def infer_style(label: str, explicit: Optional[str]) -> str:
 
 # ---------------- TUI ----------------
 class TUI:
-    def __init__(self, stdscr, args, appcfg: AppCfg, vehicle: VehicleCfg):
+    def __init__(self, stdscr, args, appcfg: AppCfg, vehicle: VehicleCfg, state: AppState, poller: "Poller"):
         self.stdscr = stdscr
         self.args = args
         self.appcfg = appcfg
         self.vehicle = vehicle
-        self.clients: Dict[str, MBClient] = {}
-        self.status: Dict[str, str] = {}
-        self.debug_msgs: Dict[str, str] = {}
-        self.latency: Dict[str, Optional[float]] = {}
-        self.display_latency: Dict[str, Dict[str, Optional[str]]] = {}
+        self.state = state
+        self.poller = poller
         self.show_debug = False
-        self.last_poll_time = 0.0
-        self.last_net_check_time = 0.0
-        self.last_wifi_check_time = 0.0
-        self.wifi_status: Optional[Dict[str, Optional[str]]] = None
-        self.wifi_refresh_interval = self.appcfg.wifi_refresh if self.appcfg.wifi_refresh is not None else self.args.poll * 2
-        self.gnss: Optional[GNSSClient] = None
 
         curses.curs_set(0)
         self.stdscr.nodelay(True)
@@ -694,109 +896,58 @@ class TUI:
         curses.init_pair(Colors.MAGENTA,curses.COLOR_MAGENTA,-1)
         curses.init_pair(Colors.WHITE,  curses.COLOR_WHITE,  -1)
 
-        self.create_clients()
-        if self.appcfg.gnss_host and self.appcfg.gnss_port:
-            self.gnss = GNSSClient(self.appcfg.gnss_host, int(self.appcfg.gnss_port))
-            self.gnss.start()
-
-    def create_clients(self):
-        self.clients = {}
-        self.status = {}
-        self.debug_msgs = {}
-        self.latency = {}
-        self.display_latency = {}
-        for cfg in self.vehicle.controllers:
-            mc = MBClient(
-                host=cfg.host,
-                port=self.args.port,
-                timeout=self.args.timeout,
-                unit_candidates=self.args.unit_candidates,
-                use_coils_fallback=self.args.coils,
-            )
-            self.clients[cfg.name] = mc
-        self.refresh_tcp_status()
-        self.last_net_check_time = time.monotonic()
-        self.last_poll_time = 0.0
-        self.last_wifi_check_time = 0.0
-
-    def refresh_tcp_status(self):
-        for cfg in self.vehicle.controllers:
-            ok, latency_ms, why = check_tcp(cfg.host, self.args.port, self.args.timeout)
-            self.latency[cfg.name] = latency_ms
-            if not ok:
-                self.status[cfg.name] = f"TCP {why or 'fail'}"
-                self.debug_msgs[cfg.name] = f"TCP check: {why}"
-            else:
-                if self.status.get(cfg.name, "") in ("", None) or self.status.get(cfg.name, "").startswith("TCP "):
-                    self.status[cfg.name] = "OK"
-                if latency_ms is not None:
-                    self.debug_msgs[cfg.name] = f"TCP ok ({latency_ms:.1f} ms)"
-                else:
-                    self.debug_msgs[cfg.name] = "TCP ok"
-
-        for name, host, port in self.appcfg.display_latency_hosts:
-            ok, latency_ms, why = check_tcp(host, port, self.args.timeout)
-            self.display_latency[name] = {
-                "latency": f"{latency_ms:.1f} ms" if latency_ms is not None else "-- ms",
-                "status": "OK" if ok else f"TCP {why or 'fail'}",
-                "host": host,
-                "port": str(port),
-            }
-
-    def draw_header(self, row: int) -> int:
+    def draw_header(self, row: int, snap: dict) -> int:
+        ts = snap.get("last_update") or 0.0
+        age = time.time() - ts if ts else 0.0
         title = f"Vehicle Modbus Monitor — {self.vehicle.name} (q: quit, r: reconnect, d: debug)"
         addstr_clip(self.stdscr, row, 0, title, curses.color_pair(Colors.YELLOW) | curses.A_BOLD)
+        addstr_clip(self.stdscr, row, max(len(title) + 2, 50), f"Age {age:.1f}s", curses.color_pair(Colors.CYAN))
         return row + 1
 
-    def draw_status_line(self, row: int) -> int:
+    def draw_status_line(self, row: int, snap: dict) -> int:
         x = 0
+        ctrls = snap.get("controllers", {})
         for cfg in self.vehicle.controllers:
-            name = cfg.name
-            st = self.status.get(name, '—')
+            st_data = ctrls.get(cfg.name, {})
+            st = st_data.get("status", "—")
             col = curses.color_pair(Colors.GREEN) if st == 'OK' else curses.color_pair(Colors.RED)
-            latency_ms = self.latency.get(name)
+            latency_ms = st_data.get("latency")
             latency_txt = f"{latency_ms:.1f} ms" if latency_ms is not None else "-- ms"
-            chunk = f"{name}:{st} {cfg.host} {latency_txt}  "
+            chunk = f"{cfg.name}:{st} {cfg.host} {latency_txt}  "
             addstr_clip(self.stdscr, row, x, chunk, col | curses.A_BOLD)
             x += len(chunk)
         return row + 1
 
-    def draw_debug(self, row: int) -> int:
+    def draw_debug(self, row: int, snap: dict) -> int:
         if not self.show_debug:
             return row
         addstr_clip(self.stdscr, row, 0, "Debug:", curses.color_pair(Colors.WHITE) | curses.A_BOLD)
         row += 1
+        ctrls = snap.get("controllers", {})
         for cfg in self.vehicle.controllers:
-            msg = self.debug_msgs.get(cfg.name, "")
+            msg = ctrls.get(cfg.name, {}).get("debug", "")
             addstr_clip(self.stdscr, row, 2, f"{cfg.name}: {msg}", curses.color_pair(Colors.WHITE))
             row += 1
         if self.appcfg.display_latency_hosts:
-            addstr_clip(self.stdscr, row, 2, f"Display latency: {self.display_latency}", curses.color_pair(Colors.WHITE))
+            addstr_clip(self.stdscr, row, 2, f"Display latency: {snap.get('display_latency', {})}", curses.color_pair(Colors.WHITE))
             row += 1
         if self.appcfg.wifi_iface:
-            wi_msg = self.wifi_status or {"status": "n/a"}
+            wi_msg = snap.get("wifi") or {"status": "n/a"}
             addstr_clip(self.stdscr, row, 2, f"WiFi: {wi_msg}", curses.color_pair(Colors.WHITE))
             row += 1
         return row
 
-    def render_controller_points(self, row: int, cfg: ControllerCfg) -> int:
+    def render_controller_points(self, row: int, cfg: ControllerCfg, snap: dict) -> int:
         heading = cfg.name if not cfg.model else f"{cfg.name} ({cfg.model})"
         addstr_clip(self.stdscr, row, 0, heading + ":", curses.color_pair(Colors.YELLOW) | curses.A_BOLD); row += 1
-        client = self.clients[cfg.name]
+        ctrl_state = snap.get("controllers", {}).get(cfg.name, {})
+        point_values = ctrl_state.get("points", {})
 
         if cfg.points:
-            refs = [p.ref for p in cfg.points]
-            values = client.read_refs(cfg.base, refs)
-            if all(values.get(r) is None for r in refs):
-                self.status[cfg.name] = "READ ERR"
-                if client.last_error:
-                    self.debug_msgs[cfg.name] = client.last_error
-            else:
-                self.status[cfg.name] = "OK"
-
             for p in cfg.points:
-                raw = values.get(p.ref)
-                logical = logical_state(p.invert, raw)
+                logical = point_values.get(str(p.ref)) if isinstance(point_values, dict) else point_values.get(p.ref)
+                if isinstance(point_values, dict) and str(p.ref) in point_values:
+                    logical = point_values[str(p.ref)]
                 di_num = p.ref - cfg.base
                 style_name = infer_style(p.label, p.style)
                 on_col, off_col = STYLE_COLORS.get(style_name, STYLE_COLORS['default'])
@@ -810,23 +961,12 @@ class TUI:
                 addstr_clip(self.stdscr, row, 0, disp, attr)
                 row += 1
 
-        # MB_IO_3 gears if present
         if cfg.gear_points:
-            # Read gears
-            gear_refs = sorted(cfg.gear_points.keys())
-            values = client.read_refs(cfg.base, gear_refs)
-            if any(values.get(r) is None for r in gear_refs):
-                self.status[cfg.name] = "READ ERR"
-                if client.last_error:
-                    self.debug_msgs[cfg.name] = client.last_error
-            else:
-                self.status[cfg.name] = "OK"
-
-            # Tokens
-            tokens: List[Tuple[str, int]] = []
-            for ref in gear_refs:
+            gear_values = ctrl_state.get("gears", {})
+            tokens = []
+            for ref in sorted(cfg.gear_points.keys()):
                 label = cfg.gear_points[ref]
-                val = values.get(ref)
+                val = gear_values.get(str(ref)) if isinstance(gear_values, dict) else gear_values.get(ref)
                 di_num = ref - cfg.base
                 token = f"DI{di_num}:{label}"
                 if val:
@@ -845,13 +985,11 @@ class TUI:
                 x += len(text)
             row = y + 1
 
-        # Extra points if any
         if cfg.extra_points:
-            refs = sorted(cfg.extra_points.keys())
-            values = client.read_refs(cfg.base, refs)
-            for ref in refs:
+            extra_values = ctrl_state.get("extra", {})
+            for ref in sorted(cfg.extra_points.keys()):
                 label = cfg.extra_points[ref]
-                val = values.get(ref)
+                val = extra_values.get(str(ref)) if isinstance(extra_values, dict) else extra_values.get(ref)
                 di_num = ref - cfg.base
                 if val is None:
                     status_txt = "N/A"
@@ -864,13 +1002,14 @@ class TUI:
 
         return row
 
-    def render_display_latency(self, row: int) -> int:
+    def render_display_latency(self, row: int, snap: dict) -> int:
         if not self.appcfg.display_latency_hosts:
             return row
         addstr_clip(self.stdscr, row, 0, "Latency checks:", curses.color_pair(Colors.YELLOW) | curses.A_BOLD)
         row += 1
+        dl = snap.get("display_latency", {})
         for name, host, port in self.appcfg.display_latency_hosts:
-            info = self.display_latency.get(name, {})
+            info = dl.get(name, {})
             status = info.get("status", "no data")
             latency_txt = info.get("latency", "-- ms")
             target = f"{host}:{port}"
@@ -880,18 +1019,15 @@ class TUI:
             row += 1
         return row
 
-    def render_gnss(self, row: int) -> int:
-        if not self.gnss:
+    def render_gnss(self, row: int, snap: dict) -> int:
+        gnss = snap.get("gnss")
+        if not gnss:
             return row
-        snap = self.gnss.snapshot()
-        if snap is None:
-            addstr_clip(self.stdscr, row, 0, "GNSS: no data", curses.color_pair(Colors.CYAN))
-            return row + 1
-        age = time.monotonic() - snap.get('ts', time.monotonic())
-        sats_txt = str(snap.get('sats')) if snap.get('sats') is not None else "--"
-        hdop_val = snap.get('hdop')
+        age = time.time() - gnss.get('ts', time.time())
+        sats_txt = str(gnss.get('sats')) if gnss.get('sats') is not None else "--"
+        hdop_val = gnss.get('hdop')
         hdop_txt = f"{hdop_val:.1f}" if isinstance(hdop_val, (int, float)) else "--"
-        fix_txt = snap.get('fix') or "NO FIX"
+        fix_txt = gnss.get('fix') or "NO FIX"
         addstr_clip(
             self.stdscr,
             row,
@@ -899,20 +1035,15 @@ class TUI:
             f"GNSS: {fix_txt}, Sats: {sats_txt}, HDOP {hdop_txt}, Age {age:.1f} s",
             curses.color_pair(Colors.YELLOW),
         )
-        lat_txt = _format_coord(snap.get('lat'), 'N', 'S') or "--"
-        lon_txt = _format_coord(snap.get('lon'), 'E', 'W') or "--"
+        lat_txt = _format_coord(gnss.get('lat'), 'N', 'S') or "--"
+        lon_txt = _format_coord(gnss.get('lon'), 'E', 'W') or "--"
         addstr_clip(self.stdscr, row + 1, 0, f"Pos: {lat_txt}, {lon_txt}", curses.color_pair(Colors.CYAN))
         return row + 2
 
-    def refresh_wifi_status(self):
-        if not self.appcfg.wifi_iface:
-            return
-        self.wifi_status = get_wifi_status(self.appcfg.wifi_iface)
-
-    def render_wifi(self, row: int) -> int:
+    def render_wifi(self, row: int, snap: dict) -> int:
         if not self.appcfg.wifi_iface:
             return row
-        status = self.wifi_status or {"status": "no data"}
+        status = snap.get("wifi") or {"status": "no data"}
         iface = self.appcfg.wifi_iface
         st = status.get("status")
         if st == "connected":
@@ -922,69 +1053,151 @@ class TUI:
             freq = status.get("freq")
             freq_txt = f", {freq}" if freq else ""
             text = f"WiFi {iface}: connected, {sig}, SSID {ssid}, BSSID {bssid}{freq_txt}"
-            attr = curses.color_pair(Colors.GREEN)
-        elif st in ("down", "error"):
-            reason = status.get("error") or st
-            text = f"WiFi {iface}: down ({reason})"
-            attr = curses.color_pair(Colors.RED)
+            addstr_clip(self.stdscr, row, 0, text, curses.color_pair(Colors.GREEN))
         elif st == "no link":
-            text = f"WiFi {iface}: no link"
-            attr = curses.color_pair(Colors.YELLOW)
+            addstr_clip(self.stdscr, row, 0, f"WiFi {iface}: no link", curses.color_pair(Colors.RED))
+        elif st == "error":
+            err = status.get("error") or "unknown"
+            addstr_clip(self.stdscr, row, 0, f"WiFi {iface}: error {err}", curses.color_pair(Colors.RED))
         else:
-            text = f"WiFi {iface}: {st}" if st else f"WiFi {iface}: unknown"
-            attr = curses.color_pair(Colors.CYAN)
-        addstr_clip(self.stdscr, row, 0, text, attr)
+            addstr_clip(self.stdscr, row, 0, f"WiFi {iface}: {status}", curses.color_pair(Colors.RED))
         return row + 1
 
     def loop(self):
         try:
             while True:
-                try:
-                    ch = self.stdscr.getch()
-                    if ch == ord('q'):
-                        break
-                    elif ch == ord('r'):
-                        self.create_clients()
-                    elif ch == ord('d'):
-                        self.show_debug = not self.show_debug
-                except Exception:
-                    pass
+                ch = self.stdscr.getch()
+                if ch == ord('q'):
+                    break
+                if ch == ord('d'):
+                    self.show_debug = not self.show_debug
+                if ch == ord('r'):
+                    self.poller.request_reconnect()
 
-                now = time.monotonic()
-                if now - self.last_net_check_time >= self.args.poll_net:
-                    self.refresh_tcp_status()
-                    self.last_net_check_time = now
-
-                if self.appcfg.wifi_iface and self.wifi_refresh_interval and now - self.last_wifi_check_time >= self.wifi_refresh_interval:
-                    self.refresh_wifi_status()
-                    self.last_wifi_check_time = now
-
-                if now - self.last_poll_time < self.args.poll:
-                    time.sleep(0.05)
-                    continue
-                self.last_poll_time = now
-
+                snap = self.state.snapshot()
                 self.stdscr.erase()
                 row = 0
-                row = self.draw_header(row)
-                row = self.draw_status_line(row)
-                row = self.draw_debug(row)
-                row += 1
-
-                for cfg in self.vehicle.controllers:
-                    row = self.render_controller_points(row, cfg)
-                    row += 1
-
-                row = self.render_display_latency(row)
-                row = self.render_wifi(row)
-                row = self.render_gnss(row)
-
+                row = self.draw_header(row, snap)
+                row = self.draw_status_line(row, snap)
+                row = self.draw_debug(row, snap)
                 addstr_clip(self.stdscr, row, 0, f"Polling {int(self.args.poll*1000)} ms | Unit IDs {self.args.unit_candidates} | Coils fallback: {self.args.coils} | pymodbus {PYMODBUS_VERSION}", curses.color_pair(Colors.MAGENTA))
+                row += 1
+                for cfg in self.vehicle.controllers:
+                    row = self.render_controller_points(row, cfg, snap)
+                row = self.render_display_latency(row, snap)
+                row = self.render_gnss(row, snap)
+                row = self.render_wifi(row, snap)
                 self.stdscr.refresh()
-        finally:
-            if self.gnss:
-                self.gnss.stop()
 
+                time.sleep(self.args.poll)
+        finally:
+            pass
+
+
+TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
+
+
+class WebServer:
+    def __init__(self, state: AppState, host: str, port: int, broadcast_interval: float = 1.0):
+        self.state = state
+        self.host = host
+        self.port = port
+        self.broadcast_interval = broadcast_interval
+        self.thread: Optional[threading.Thread] = None
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
+        self.stop_event = threading.Event()
+        self.websockets: set = set()
+        loader = jinja2.FileSystemLoader(str(TEMPLATE_DIR))
+        self.template_env = jinja2.Environment(loader=loader, autoescape=True)
+        self.template = self.template_env.get_template("dashboard.html")
+
+    async def index(self, request: web.Request) -> web.Response:
+        initial_json = jsonlib.dumps(self.state.snapshot())
+        html = self.template.render(initial_state=initial_json)
+        return web.Response(text=html, content_type="text/html")
+
+    async def websocket_handler(self, request: web.Request) -> web.WebSocketResponse:
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        self.websockets.add(ws)
+        try:
+            await ws.send_json({"type": "state", "data": self.state.snapshot()})
+            async for msg in ws:
+                if msg.type == WSMsgType.ERROR:
+                    break
+        finally:
+            self.websockets.discard(ws)
+        return ws
+
+    async def broadcast_snapshot(self):
+        if not self.websockets:
+            return
+        payload = {"type": "state", "data": self.state.snapshot()}
+        dead: List[web.WebSocketResponse] = []
+        for ws in list(self.websockets):
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self.websockets.discard(ws)
+
+    async def broadcast_loop(self):
+        loop = asyncio.get_running_loop()
+        while not self.stop_event.is_set():
+            try:
+                triggered = await loop.run_in_executor(None, self.state.update_event.wait, self.broadcast_interval)
+            finally:
+                self.state.update_event.clear()
+            if triggered or not self.websockets:
+                await self.broadcast_snapshot()
+
+    async def _run_async(self):
+        app = web.Application()
+        app.add_routes([
+            web.get('/', self.index),
+            web.get('/ws', self.websocket_handler),
+        ])
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, self.host, self.port)
+        await site.start()
+        broadcast_task = asyncio.create_task(self.broadcast_loop())
+        try:
+            while not self.stop_event.is_set():
+                await asyncio.sleep(0.25)
+        finally:
+            self.stop_event.set()
+            self.state.update_event.set()
+            broadcast_task.cancel()
+            try:
+                await broadcast_task
+            except asyncio.CancelledError:
+                pass
+            await runner.cleanup()
+
+    def _thread_main(self):
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        try:
+            self.loop.run_until_complete(self._run_async())
+        finally:
+            self.loop.close()
+
+    def start(self):
+        self.thread = threading.Thread(target=self._thread_main, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        self.stop_event.set()
+        self.state.update_event.set()
+        if self.loop:
+            try:
+                self.loop.call_soon_threadsafe(lambda: None)
+            except Exception:
+                pass
+        if self.thread:
+            self.thread.join(timeout=2)
 # ---------------- Diagnostics ----------------
 def run_diag(args, appcfg: AppCfg, vehicle: VehicleCfg):
     print(f"pymodbus version: {PYMODBUS_VERSION}")
@@ -1030,10 +1243,13 @@ def parse_args():
     ap.add_argument("--unit", type=int, help="Force a single unit id (overrides candidates)")
     ap.add_argument("--unit-candidates", type=int, nargs="*", default=DEFAULT_UNIT_CANDIDATES, help="Unit ids to try (default 1 255 0)")
     ap.add_argument("--no-coils", dest="coils", action="store_false", help="Disable fallback to read_coils if DI fails")
-    ap.add_argument("--poll", type=float, default=DEFAULT_POLL_INTERVAL_SEC, help="Polling interval seconds (default 0.35)")
+    ap.add_argument("--poll", type=float, default=DEFAULT_POLL_INTERVAL_SEC, help=f"Polling interval seconds (default {DEFAULT_POLL_INTERVAL_SEC})")
     ap.add_argument("--poll-net", type=float, default=None, help="Network/latency polling interval seconds (default --poll)")
     ap.add_argument("--diag", action="store_true", help="Run diagnostics and exit")
     ap.add_argument("--verbose", action="store_true", help="Enable verbose pymodbus logging (stdout/stderr)")
+    ap.add_argument("--http", action="store_true", help="Enable HTTP/WebSocket server")
+    ap.add_argument("--http-port", type=int, default=8080, help="Port for HTTP/WebSocket server (default 8080)")
+    ap.add_argument("--no-tui", action="store_true", help="Run headless without curses UI")
     args = ap.parse_args()
 
     if args.poll_net is None:
@@ -1091,11 +1307,30 @@ def main():
         run_diag(args, appcfg, vehicle)
         return
 
+    state = AppState(vehicle, appcfg)
+    poller = Poller(args, appcfg, vehicle, state)
+    poller.start()
+    web_server: Optional[WebServer] = None
+    if args.http:
+        web_server = WebServer(state, '0.0.0.0', args.http_port, broadcast_interval=args.poll)
+        web_server.start()
+
     def wrapped(stdscr):
-        ui = TUI(stdscr, args, appcfg, vehicle)
+        ui = TUI(stdscr, args, appcfg, vehicle, state, poller)
         ui.loop()
 
-    curses.wrapper(wrapped)
+    try:
+        if args.no_tui:
+            while True:
+                time.sleep(1)
+        else:
+            curses.wrapper(wrapped)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        poller.stop()
+        if web_server:
+            web_server.stop()
 
 
 if __name__ == "__main__":
