@@ -156,6 +156,14 @@ class AppState:
         self.last_update: float = 0.0
 
         for cfg in self.vehicle.controllers:
+            point_meta = {}
+            for p in cfg.points:
+                style_name = infer_style(p.label, p.style)
+                point_meta[str(p.ref)] = {
+                    "label": p.label,
+                    "style": style_name,
+                    "di": p.ref - cfg.base,
+                }
             self.controllers[cfg.name] = {
                 "host": cfg.host,
                 "base": cfg.base,
@@ -164,6 +172,7 @@ class AppState:
                 "latency": None,
                 "debug": "",
                 "points": {},
+                "points_meta": point_meta,
                 "gears": {},
                 "extra": {},
             }
