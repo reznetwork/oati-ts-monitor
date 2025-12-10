@@ -81,6 +81,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional, Any
+import threading
 
 from pymodbus.client import ModbusTcpClient
 from pymodbus import __version__ as PYMODBUS_VERSION
@@ -124,6 +125,8 @@ class AppCfg:
     timeout: float = DEFAULT_TIMEOUT
     unit_candidates: List[int] = field(default_factory=lambda: DEFAULT_UNIT_CANDIDATES[:])
     coils_fallback: bool = DEFAULT_COILS_FALLBACK
+    gnss_host: Optional[str] = None
+    gnss_port: Optional[int] = None
     vehicles: List[VehicleCfg] = field(default_factory=list)
 
 # ---------------- Config loader ----------------
@@ -144,6 +147,10 @@ def load_config(path: str) -> AppCfg:
     timeout = float(raw.get('pymodbus', {}).get('timeout', DEFAULT_TIMEOUT))
     unit_candidates = list(raw.get('pymodbus', {}).get('unitCandidates', DEFAULT_UNIT_CANDIDATES))
     coils_fallback = bool(raw.get('pymodbus', {}).get('coilsFallback', DEFAULT_COILS_FALLBACK))
+    gnss_cfg = raw.get('gnss', {}) or {}
+    gnss_host = gnss_cfg.get('host')
+    gnss_port = gnss_cfg.get('port')
+    gnss_port_int = int(gnss_port) if gnss_port is not None else None
 
     vehicles: List[VehicleCfg] = []
     for v in raw.get('vehicles', []):
@@ -165,7 +172,15 @@ def load_config(path: str) -> AppCfg:
             ))
         vehicles.append(VehicleCfg(name=str(v.get('name', 'vehicle')), controllers=ctrls))
 
-    return AppCfg(port=port, timeout=timeout, unit_candidates=unit_candidates, coils_fallback=coils_fallback, vehicles=vehicles)
+    return AppCfg(
+        port=port,
+        timeout=timeout,
+        unit_candidates=unit_candidates,
+        coils_fallback=coils_fallback,
+        gnss_host=str(gnss_host) if gnss_host else None,
+        gnss_port=gnss_port_int,
+        vehicles=vehicles,
+    )
 
 # --- Auto-bootstrap default config if missing ---
 def write_default_config(path: str) -> None:
@@ -392,6 +407,115 @@ class MBClient:
                 out[ref] = bool(bits[idx])
         return out
 
+# ---------------- GNSS client ----------------
+def _nmea_to_deg(raw: str, direction: str) -> Optional[float]:
+    if not raw or not direction:
+        return None
+    try:
+        val = float(raw)
+        deg = int(val // 100)
+        minutes = val - deg * 100
+        deg = deg + minutes / 60.0
+        if direction in ('S', 'W'):
+            deg = -deg
+        return deg
+    except Exception:
+        return None
+
+
+def _format_coord(deg: Optional[float], pos: str, neg: str) -> Optional[str]:
+    if deg is None:
+        return None
+    hemi = pos if deg >= 0 else neg
+    return f"{abs(deg):.4f} {hemi}"
+
+
+class GNSSClient:
+    def __init__(self, host: str, port: int):
+        self.host = host
+        self.port = port
+        self.thread: Optional[threading.Thread] = None
+        self.stop_event = threading.Event()
+        self.lock = threading.Lock()
+        self.state: Optional[Dict[str, Any]] = None
+        self.last_gsa_fix: Optional[str] = None
+
+    def start(self):
+        if self.thread and self.thread.is_alive():
+            return
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        self.stop_event.set()
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=2)
+
+    def snapshot(self) -> Optional[Dict[str, Any]]:
+        with self.lock:
+            if self.state is None:
+                return None
+            return dict(self.state)
+
+    def _run(self):
+        while not self.stop_event.is_set():
+            try:
+                with socket.create_connection((self.host, self.port), timeout=5) as sock:
+                    sock.settimeout(5)
+                    self.last_gsa_fix = None
+                    fh = sock.makefile('r', encoding='ascii', errors='ignore', newline='\n')
+                    while not self.stop_event.is_set():
+                        line = fh.readline()
+                        if not line:
+                            break
+                        self._handle_line(line.strip())
+            except Exception:
+                pass
+            if self.stop_event.wait(2.0):
+                break
+
+    def _handle_line(self, line: str):
+        if '*' in line:
+            line = line.split('*', 1)[0]
+        parts = line.split(',')
+        if not parts or not parts[0].startswith('$'):
+            return
+        sent = parts[0][1:]
+        if sent.endswith('GSA'):
+            fix_map = {'1': 'NO FIX', '2': 'FIX 2D', '3': 'FIX 3D'}
+            if len(parts) > 2:
+                self.last_gsa_fix = fix_map.get(parts[2])
+        elif sent.endswith('GGA'):
+            if len(parts) < 9:
+                return
+            try:
+                fix_quality = int(parts[6] or 0)
+            except Exception:
+                return
+            try:
+                sats = int(parts[7]) if parts[7] else None
+            except Exception:
+                sats = None
+            try:
+                hdop = float(parts[8]) if parts[8] else None
+            except Exception:
+                hdop = None
+            if fix_quality <= 0:
+                return
+            lat = _nmea_to_deg(parts[2], parts[3])
+            lon = _nmea_to_deg(parts[4], parts[5])
+            fix_map = {0: 'NO FIX', 1: 'FIX', 2: 'DGPS'}
+            fix = self.last_gsa_fix or fix_map.get(fix_quality, 'FIX')
+            with self.lock:
+                self.state = {
+                    'fix': fix,
+                    'sats': sats,
+                    'hdop': hdop,
+                    'lat': lat,
+                    'lon': lon,
+                    'ts': time.monotonic(),
+                }
+
 # ---------------- UI helpers ----------------
 def addstr_clip(win, y: int, x: int, text: str, attr: int = 0):
     max_x = curses.COLS - 1
@@ -455,6 +579,7 @@ class TUI:
         self.show_debug = False
         self.last_poll_time = 0.0
         self.last_net_check_time = 0.0
+        self.gnss: Optional[GNSSClient] = None
 
         curses.curs_set(0)
         self.stdscr.nodelay(True)
@@ -468,6 +593,9 @@ class TUI:
         curses.init_pair(Colors.WHITE,  curses.COLOR_WHITE,  -1)
 
         self.create_clients()
+        if self.appcfg.gnss_host and self.appcfg.gnss_port:
+            self.gnss = GNSSClient(self.appcfg.gnss_host, int(self.appcfg.gnss_port))
+            self.gnss.start()
 
     def create_clients(self):
         self.clients = {}
@@ -616,42 +744,72 @@ class TUI:
 
         return row
 
+    def render_gnss(self, row: int) -> int:
+        if not self.gnss:
+            return row
+        snap = self.gnss.snapshot()
+        if snap is None:
+            addstr_clip(self.stdscr, row, 0, "GNSS: no data", curses.color_pair(Colors.CYAN))
+            return row + 1
+        age = time.monotonic() - snap.get('ts', time.monotonic())
+        sats_txt = str(snap.get('sats')) if snap.get('sats') is not None else "--"
+        hdop_val = snap.get('hdop')
+        hdop_txt = f"{hdop_val:.1f}" if isinstance(hdop_val, (int, float)) else "--"
+        fix_txt = snap.get('fix') or "NO FIX"
+        addstr_clip(
+            self.stdscr,
+            row,
+            0,
+            f"GNSS: {fix_txt}, Sats: {sats_txt}, HDOP {hdop_txt}, Age {age:.1f} s",
+            curses.color_pair(Colors.YELLOW),
+        )
+        lat_txt = _format_coord(snap.get('lat'), 'N', 'S') or "--"
+        lon_txt = _format_coord(snap.get('lon'), 'E', 'W') or "--"
+        addstr_clip(self.stdscr, row + 1, 0, f"Pos: {lat_txt}, {lon_txt}", curses.color_pair(Colors.CYAN))
+        return row + 2
+
     def loop(self):
-        while True:
-            try:
-                ch = self.stdscr.getch()
-                if ch == ord('q'):
-                    break
-                elif ch == ord('r'):
-                    self.create_clients()
-                elif ch == ord('d'):
-                    self.show_debug = not self.show_debug
-            except Exception:
-                pass
+        try:
+            while True:
+                try:
+                    ch = self.stdscr.getch()
+                    if ch == ord('q'):
+                        break
+                    elif ch == ord('r'):
+                        self.create_clients()
+                    elif ch == ord('d'):
+                        self.show_debug = not self.show_debug
+                except Exception:
+                    pass
 
-            now = time.monotonic()
-            if now - self.last_net_check_time >= self.args.poll_net:
-                self.refresh_tcp_status()
-                self.last_net_check_time = now
+                now = time.monotonic()
+                if now - self.last_net_check_time >= self.args.poll_net:
+                    self.refresh_tcp_status()
+                    self.last_net_check_time = now
 
-            if now - self.last_poll_time < self.args.poll:
-                time.sleep(0.05)
-                continue
-            self.last_poll_time = now
+                if now - self.last_poll_time < self.args.poll:
+                    time.sleep(0.05)
+                    continue
+                self.last_poll_time = now
 
-            self.stdscr.erase()
-            row = 0
-            row = self.draw_header(row)
-            row = self.draw_status_line(row)
-            row = self.draw_debug(row)
-            row += 1
-
-            for cfg in self.vehicle.controllers:
-                row = self.render_controller_points(row, cfg)
+                self.stdscr.erase()
+                row = 0
+                row = self.draw_header(row)
+                row = self.draw_status_line(row)
+                row = self.draw_debug(row)
                 row += 1
 
-            addstr_clip(self.stdscr, row, 0, f"Polling {int(self.args.poll*1000)} ms | Unit IDs {self.args.unit_candidates} | Coils fallback: {self.args.coils} | pymodbus {PYMODBUS_VERSION}", curses.color_pair(Colors.MAGENTA))
-            self.stdscr.refresh()
+                for cfg in self.vehicle.controllers:
+                    row = self.render_controller_points(row, cfg)
+                    row += 1
+
+                row = self.render_gnss(row)
+
+                addstr_clip(self.stdscr, row, 0, f"Polling {int(self.args.poll*1000)} ms | Unit IDs {self.args.unit_candidates} | Coils fallback: {self.args.coils} | pymodbus {PYMODBUS_VERSION}", curses.color_pair(Colors.MAGENTA))
+                self.stdscr.refresh()
+        finally:
+            if self.gnss:
+                self.gnss.stop()
 
 # ---------------- Diagnostics ----------------
 def run_diag(args, appcfg: AppCfg, vehicle: VehicleCfg):
