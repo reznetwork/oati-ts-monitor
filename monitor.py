@@ -24,10 +24,12 @@ Usage
 JSON config (save as monitor_config.json)
 ----------------------------------------
 # Minimal working example for your current setup (ICPDAS ET-7002/ET-7051 + MB_IO_3):
-{
-  "pymodbus": {"port": 502, "timeout": 2.5, "unitCandidates": [1, 255, 0], "coilsFallback": true},
-  "wifi": {"interface": "wlp2s0", "refreshSeconds": 2},
-  "vehicles": [
+  {
+    "pymodbus": {"port": 502, "timeout": 2.5, "unitCandidates": [1, 255, 0], "coilsFallback": true},
+    "gnss": {"host": "192.168.1.50", "port": 2947},
+    "wifi": {"interface": "wlp2s0", "refreshSeconds": 2},
+    "display": {"latencyHosts": [{"name": "gateway", "host": "192.168.1.1"}]},
+    "vehicles": [
     {
       "name": "Tractor A",
       "controllers": [
@@ -425,6 +427,7 @@ def load_config(path: str) -> AppCfg:
 def write_default_config(path: str) -> None:
     default = {
         "pymodbus": {"port": DEFAULT_MODBUS_PORT, "timeout": DEFAULT_TIMEOUT, "unitCandidates": DEFAULT_UNIT_CANDIDATES, "coilsFallback": DEFAULT_COILS_FALLBACK},
+        "gnss": {"host": "192.168.1.50", "port": 2947},
         "wifi": {"interface": "wlp2s0", "refreshSeconds": 2},
         "display": {"latencyHosts": [{"name": "gateway", "host": "192.168.1.1"}]},
         "vehicles": [
