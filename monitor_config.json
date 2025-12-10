@@ -9,6 +9,18 @@
     ],
     "coilsFallback": true
   },
+  "wifi": {
+    "interface": "wlp2s0",
+    "refreshSeconds": 2
+  },
+  "display": {
+    "latencyHosts": [
+      {
+        "name": "gateway",
+        "host": "192.168.1.1"
+      }
+    ]
+  },
   "vehicles": [
     {
       "name": "Tractor A",
