@@ -88,6 +88,7 @@ from typing import Dict, List, Tuple, Optional, Any
 import threading
 import json as jsonlib
 from pathlib import Path
+from datetime import datetime, timezone
 
 import jinja2
 from aiohttp import WSMsgType, web
@@ -147,6 +148,7 @@ class AppState:
         self.appcfg = appcfg
         self.lock = threading.RLock()
         self.update_event = threading.Event()
+        self.log_event = threading.Event()
         self.controllers: Dict[str, Dict[str, Any]] = {}
         self.gnss: Optional[Dict[str, Any]] = None
         self.wifi: Optional[Dict[str, Any]] = None
@@ -184,24 +186,153 @@ class AppState:
             self.controllers[name].update(kwargs)
             self.last_update = time.time()
             self.update_event.set()
+            self.log_event.set()
 
     def set_gnss(self, snap: Optional[Dict[str, Any]]):
         with self.lock:
             self.gnss = snap
             self.last_update = time.time()
             self.update_event.set()
+            self.log_event.set()
 
     def set_wifi(self, snap: Optional[Dict[str, Any]]):
         with self.lock:
             self.wifi = snap
             self.last_update = time.time()
             self.update_event.set()
+            self.log_event.set()
 
     def set_display_latency(self, data: Dict[str, Dict[str, Optional[str]]]):
         with self.lock:
             self.display_latency = data
             self.last_update = time.time()
             self.update_event.set()
+            self.log_event.set()
+
+
+class DataLogger:
+    def __init__(self, state: AppState, vehicle: VehicleCfg, log_file: Optional[str], interval: Optional[float]):
+        self.state = state
+        self.vehicle = vehicle
+        self.log_file = Path(log_file).expanduser() if log_file else None
+        self.interval = interval if interval and interval > 0 else None
+        self.stop_event = threading.Event()
+        self.thread: Optional[threading.Thread] = None
+        self.last_error: Optional[str] = None
+        self.active = False
+
+    @property
+    def configured(self) -> bool:
+        return self.log_file is not None
+
+    def start(self):
+        if not self.log_file:
+            return
+        try:
+            if self.log_file.parent:
+                self.log_file.parent.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            self.last_error = f"mkdir failed: {e}"
+            return
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        self.stop_event.set()
+        self.state.log_event.set()
+        if self.thread:
+            self.thread.join(timeout=2)
+
+    def status_text(self) -> str:
+        if not self.log_file:
+            return ""
+        interval_txt = f"{self.interval:.1f}s" if self.interval is not None else "on change"
+        if self.last_error:
+            return f"Log error: {self.last_error}"
+        return f"Log: {self.log_file} ({interval_txt})"
+
+    def _state_text(self, val: Optional[bool]) -> Optional[str]:
+        if val is True:
+            return "ON"
+        if val is False:
+            return "OFF"
+        return None
+
+    def _gear_selection(self, cfg: ControllerCfg, ctrl_snap: Dict[str, Any]) -> Optional[str]:
+        gear_vals = ctrl_snap.get("gears", {}) or {}
+        for ref, label in cfg.gear_points.items():
+            if gear_vals.get(str(ref)):
+                return label
+        return None
+
+    def _build_entry(self, snap: Dict[str, Any]) -> Dict[str, Any]:
+        entry: Dict[str, Any] = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "vehicle": snap.get("vehicle"),
+            "controllers": [],
+            "gnss": snap.get("gnss"),
+            "wifi": snap.get("wifi"),
+        }
+
+        ctrls = snap.get("controllers", {}) or {}
+        for cfg in self.vehicle.controllers:
+            ctrl_snap = ctrls.get(cfg.name, {}) or {}
+            ctrl_entry = {
+                "name": cfg.name,
+                "host": ctrl_snap.get("host") or cfg.host,
+                "status": ctrl_snap.get("status"),
+                "latency_ms": ctrl_snap.get("latency"),
+                "points": [],
+                "gear_selection": self._gear_selection(cfg, ctrl_snap),
+                "extra": ctrl_snap.get("extra"),
+            }
+            points_state = ctrl_snap.get("points", {}) or {}
+            for p in cfg.points:
+                ctrl_entry["points"].append({
+                    "controller": cfg.name,
+                    "ref": p.ref,
+                    "label": p.label,
+                    "state": self._state_text(points_state.get(str(p.ref))),
+                })
+            entry["controllers"].append(ctrl_entry)
+        return entry
+
+    def _write_snapshot(self, fh):
+        snap = self.state.snapshot()
+        entry = self._build_entry(snap)
+        fh.write(jsonlib.dumps(entry, ensure_ascii=False) + "\n")
+        fh.flush()
+
+    def _wait_for_trigger(self) -> bool:
+        try:
+            if self.interval is None:
+                triggered = self.state.log_event.wait()
+            else:
+                triggered = self.state.log_event.wait(self.interval)
+            return triggered
+        finally:
+            self.state.log_event.clear()
+
+    def _loop(self):
+        if not self.log_file:
+            return
+        try:
+            with self.log_file.open("a", encoding="utf-8") as fh:
+                self.active = True
+                while not self.stop_event.is_set():
+                    try:
+                        triggered = self._wait_for_trigger()
+                        if self.stop_event.is_set():
+                            break
+                        if triggered or self.interval is not None:
+                            self._write_snapshot(fh)
+                    except Exception as e:
+                        self.last_error = f"write failed: {e}"
+                        self.active = False
+                        break
+        except Exception as e:
+            self.last_error = f"open failed: {e}"
+            self.active = False
 
 # ---------------- Config loader ----------------
 def _as_int_keys(d: Dict[str, Any]) -> Dict[int, str]:
@@ -876,13 +1007,14 @@ def infer_style(label: str, explicit: Optional[str]) -> str:
 
 # ---------------- TUI ----------------
 class TUI:
-    def __init__(self, stdscr, args, appcfg: AppCfg, vehicle: VehicleCfg, state: AppState, poller: "Poller"):
+    def __init__(self, stdscr, args, appcfg: AppCfg, vehicle: VehicleCfg, state: AppState, poller: "Poller", datalogger: Optional["DataLogger"] = None):
         self.stdscr = stdscr
         self.args = args
         self.appcfg = appcfg
         self.vehicle = vehicle
         self.state = state
         self.poller = poller
+        self.datalogger = datalogger
         self.show_debug = False
 
         curses.curs_set(0)
@@ -916,6 +1048,11 @@ class TUI:
             chunk = f"{cfg.name}:{st} {cfg.host} {latency_txt}  "
             addstr_clip(self.stdscr, row, x, chunk, col | curses.A_BOLD)
             x += len(chunk)
+        if self.datalogger and self.datalogger.configured:
+            col = curses.color_pair(Colors.GREEN)
+            if self.datalogger.last_error:
+                col = curses.color_pair(Colors.RED) | curses.A_BOLD
+            addstr_clip(self.stdscr, row, x, self.datalogger.status_text(), col)
         return row + 1
 
     def draw_debug(self, row: int, snap: dict) -> int:
@@ -1250,10 +1387,15 @@ def parse_args():
     ap.add_argument("--http", action="store_true", help="Enable HTTP/WebSocket server")
     ap.add_argument("--http-port", type=int, default=8080, help="Port for HTTP/WebSocket server (default 8080)")
     ap.add_argument("--no-tui", action="store_true", help="Run headless without curses UI")
+    ap.add_argument("--log-file", type=str, default=None, help="Path to JSONL log file (disabled if not set)")
+    ap.add_argument("--log-interval", type=float, default=None, help="Seconds between log writes (default: on every update)")
     args = ap.parse_args()
 
     if args.poll_net is None:
         args.poll_net = args.poll
+
+    if args.log_interval is not None and args.log_interval <= 0:
+        args.log_interval = None
 
     return args
 
@@ -1310,13 +1452,15 @@ def main():
     state = AppState(vehicle, appcfg)
     poller = Poller(args, appcfg, vehicle, state)
     poller.start()
+    datalogger = DataLogger(state, vehicle, args.log_file, args.log_interval)
+    datalogger.start()
     web_server: Optional[WebServer] = None
     if args.http:
         web_server = WebServer(state, '0.0.0.0', args.http_port, broadcast_interval=args.poll)
         web_server.start()
 
     def wrapped(stdscr):
-        ui = TUI(stdscr, args, appcfg, vehicle, state, poller)
+        ui = TUI(stdscr, args, appcfg, vehicle, state, poller, datalogger)
         ui.loop()
 
     try:
@@ -1331,6 +1475,8 @@ def main():
         poller.stop()
         if web_server:
             web_server.stop()
+        if datalogger:
+            datalogger.stop()
 
 
 if __name__ == "__main__":
