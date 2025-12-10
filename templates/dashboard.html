@@ -12,8 +12,20 @@
     .card h3 { margin-top: 0; }
     .status-ok { color: #4caf50; }
     .status-bad { color: #f44336; }
-    .points { list-style: none; padding: 0; margin: 0; }
-    .points li { padding: 2px 0; }
+    .points { list-style: none; padding: 0; margin: 8px 0 0 0; display: flex; flex-direction: column; gap: 6px; }
+    .point-row { display: flex; justify-content: space-between; align-items: center; background: #0d1c22; border: 1px solid #1c3a43; border-radius: 4px; padding: 6px 8px; --on:#4caf50; --off:#f44336; }
+    .point-left { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .point-ref { color: #9ad1d4; font-family: monospace; }
+    .point-label { font-weight: 600; }
+    .point-style { background: #1c3a43; border-radius: 4px; padding: 2px 6px; font-size: 12px; color: #9ad1d4; text-transform: capitalize; }
+    .point-state { font-weight: 700; }
+    .state-unknown .point-state { color: #9e9e9e; }
+    .point-row.state-on .point-state { color: var(--on); }
+    .point-row.state-off .point-state { color: var(--off); }
+    .style-handbrake { --on:#f44336; --off:#4caf50; }
+    .style-seatbelt { --on:#4caf50; --off:#f44336; }
+    .style-engine { --on:#4caf50; --off:#f44336; }
+    .style-indicator { --on:#ffeb3b; --off:#cfd8dc; }
     code { background: #0e1a1f; padding: 2px 4px; border-radius: 3px; }
   </style>
 </head>
@@ -54,11 +66,37 @@
         card.innerHTML = `<h3>${name}</h3><div>Status: <span class="${statusClass}">${info.status || '—'}</span> Latency: ${info.latency ?? '--'} ms</div>`;
         const ul = document.createElement('ul');
         ul.className = 'points';
+        const meta = info.points_meta || {};
         for (const [ref, val] of Object.entries(info.points || {})) {
+          const pointMeta = meta[ref] || {};
           const stateTxt = val === null ? 'N/A' : (val ? 'ON' : 'OFF');
-          const cls = val ? 'status-ok' : 'status-bad';
+          const stateClass = val === null ? 'state-unknown' : (val ? 'state-on' : 'state-off');
+          const style = pointMeta.style || 'default';
+          const di = typeof pointMeta.di === 'number' ? `DI${pointMeta.di.toString().padStart(2, '0')}` : ref;
           const li = document.createElement('li');
-          li.innerHTML = `<code>${ref}</code>: <span class="${cls}">${stateTxt}</span>`;
+          li.className = `point-row ${stateClass} style-${style}`;
+
+          const left = document.createElement('div');
+          left.className = 'point-left';
+          const refEl = document.createElement('span');
+          refEl.className = 'point-ref';
+          refEl.textContent = di;
+          const labelEl = document.createElement('span');
+          labelEl.className = 'point-label';
+          labelEl.textContent = pointMeta.label || ref;
+          const styleEl = document.createElement('span');
+          styleEl.className = 'point-style';
+          styleEl.textContent = style;
+          left.appendChild(refEl);
+          left.appendChild(labelEl);
+          left.appendChild(styleEl);
+
+          const stateEl = document.createElement('div');
+          stateEl.className = 'point-state';
+          stateEl.textContent = stateTxt;
+
+          li.appendChild(left);
+          li.appendChild(stateEl);
           ul.appendChild(li);
         }
         if (Object.keys(info.gears || {}).length) {
