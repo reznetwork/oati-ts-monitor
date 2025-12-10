@@ -26,6 +26,7 @@ JSON config (save as monitor_config.json)
 # Minimal working example for your current setup (ICPDAS ET-7002/ET-7051 + MB_IO_3):
 {
   "pymodbus": {"port": 502, "timeout": 2.5, "unitCandidates": [1, 255, 0], "coilsFallback": true},
+  "wifi": {"interface": "wlp2s0", "refreshSeconds": 2},
   "vehicles": [
     {
       "name": "Tractor A",
@@ -79,6 +80,8 @@ import locale
 import argparse
 import logging
 import os
+import re
+import subprocess
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional, Any
 import threading
@@ -127,6 +130,9 @@ class AppCfg:
     coils_fallback: bool = DEFAULT_COILS_FALLBACK
     gnss_host: Optional[str] = None
     gnss_port: Optional[int] = None
+    wifi_iface: Optional[str] = None
+    wifi_refresh: Optional[float] = None
+    display_latency_hosts: List[Tuple[str, str, int]] = field(default_factory=list)
     vehicles: List[VehicleCfg] = field(default_factory=list)
 
 # ---------------- Config loader ----------------
@@ -151,6 +157,28 @@ def load_config(path: str) -> AppCfg:
     gnss_host = gnss_cfg.get('host')
     gnss_port = gnss_cfg.get('port')
     gnss_port_int = int(gnss_port) if gnss_port is not None else None
+
+    wifi_cfg = raw.get('wifi', {}) or {}
+    wifi_iface = str(wifi_cfg.get('interface')).strip() if wifi_cfg.get('interface') else None
+    wifi_refresh_raw = wifi_cfg.get('refreshSeconds')
+    try:
+        wifi_refresh = float(wifi_refresh_raw) if wifi_refresh_raw is not None else None
+    except Exception:
+        wifi_refresh = None
+    if wifi_refresh is not None and wifi_refresh <= 0:
+        wifi_refresh = None
+
+    display_cfg = raw.get('display', {}) or {}
+    latency_hosts_cfg = display_cfg.get('latencyHosts', []) or []
+    latency_hosts: List[Tuple[str, str, int]] = []
+    for entry in latency_hosts_cfg:
+        try:
+            name = str(entry.get('name') or entry.get('label') or entry.get('host') or 'host')
+            host = str(entry['host'])
+            port = int(entry.get('port', port))
+            latency_hosts.append((name, host, port))
+        except Exception:
+            continue
 
     vehicles: List[VehicleCfg] = []
     for v in raw.get('vehicles', []):
@@ -179,6 +207,9 @@ def load_config(path: str) -> AppCfg:
         coils_fallback=coils_fallback,
         gnss_host=str(gnss_host) if gnss_host else None,
         gnss_port=gnss_port_int,
+        wifi_iface=wifi_iface,
+        wifi_refresh=wifi_refresh,
+        display_latency_hosts=latency_hosts,
         vehicles=vehicles,
     )
 
@@ -186,6 +217,8 @@ def load_config(path: str) -> AppCfg:
 def write_default_config(path: str) -> None:
     default = {
         "pymodbus": {"port": DEFAULT_MODBUS_PORT, "timeout": DEFAULT_TIMEOUT, "unitCandidates": DEFAULT_UNIT_CANDIDATES, "coilsFallback": DEFAULT_COILS_FALLBACK},
+        "wifi": {"interface": "wlp2s0", "refreshSeconds": 2},
+        "display": {"latencyHosts": [{"name": "gateway", "host": "192.168.1.1"}]},
         "vehicles": [
             {
                 "name": "Tractor A",
@@ -278,6 +311,71 @@ def check_tcp(host: str, port: int, timeout: float) -> Tuple[bool, Optional[floa
         if isinstance(e, OSError) and "No route" in str(e):
             return False, None, "no route"
         return False, None, etxt
+
+
+def _freq_to_channel(freq_mhz: Optional[int]) -> Optional[int]:
+    if freq_mhz is None:
+        return None
+    if 2412 <= freq_mhz <= 2472:
+        return (freq_mhz - 2407) // 5
+    if freq_mhz == 2484:
+        return 14
+    if 5000 <= freq_mhz <= 5900:
+        return (freq_mhz - 5000) // 5
+    return None
+
+
+def get_wifi_status(interface: str) -> Dict[str, Optional[str]]:
+    """Return WiFi link details parsed from `iw dev <iface> link` output."""
+    cmd = ["iw", "dev", interface, "link"]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+    except Exception as e:
+        return {"status": "error", "error": f"exec failed: {e}"}
+
+    stdout = (res.stdout or "").strip()
+    stderr = (res.stderr or "").strip()
+    if res.returncode != 0:
+        msg = stderr or stdout or "iw failed"
+        return {"status": "down", "error": msg}
+    if not stdout or "Not connected" in stdout:
+        return {"status": "no link"}
+
+    ssid = None
+    bssid = None
+    signal = None
+    freq = None
+    for line in stdout.splitlines():
+        line = line.strip()
+        if line.startswith("Connected to"):
+            parts = line.split()
+            if len(parts) >= 3:
+                bssid = parts[2]
+        elif line.startswith("SSID:"):
+            ssid = line.split(":", 1)[1].strip() or None
+        elif line.startswith("freq:"):
+            try:
+                freq = int(line.split(":", 1)[1].strip())
+            except Exception:
+                freq = None
+        elif line.startswith("signal:"):
+            match = re.search(r"(-?\d+\s*dBm)", line)
+            if match:
+                signal = match.group(1)
+
+    chan = _freq_to_channel(freq)
+    freq_txt = f"{freq} MHz" if freq is not None else None
+    if chan is not None:
+        freq_txt = f"{freq_txt} (ch {chan})" if freq_txt else f"ch {chan}"
+
+    status = {
+        "status": "connected",
+        "ssid": ssid,
+        "bssid": bssid,
+        "signal": signal,
+        "freq": freq_txt,
+    }
+    return status
 
 # ---------------- Pymodbus call helper ----------------
 def call_bits(method, address: int, count: int, unit: int):
@@ -576,9 +674,13 @@ class TUI:
         self.status: Dict[str, str] = {}
         self.debug_msgs: Dict[str, str] = {}
         self.latency: Dict[str, Optional[float]] = {}
+        self.display_latency: Dict[str, Dict[str, Optional[str]]] = {}
         self.show_debug = False
         self.last_poll_time = 0.0
         self.last_net_check_time = 0.0
+        self.last_wifi_check_time = 0.0
+        self.wifi_status: Optional[Dict[str, Optional[str]]] = None
+        self.wifi_refresh_interval = self.appcfg.wifi_refresh if self.appcfg.wifi_refresh is not None else self.args.poll * 2
         self.gnss: Optional[GNSSClient] = None
 
         curses.curs_set(0)
@@ -602,6 +704,7 @@ class TUI:
         self.status = {}
         self.debug_msgs = {}
         self.latency = {}
+        self.display_latency = {}
         for cfg in self.vehicle.controllers:
             mc = MBClient(
                 host=cfg.host,
@@ -614,6 +717,7 @@ class TUI:
         self.refresh_tcp_status()
         self.last_net_check_time = time.monotonic()
         self.last_poll_time = 0.0
+        self.last_wifi_check_time = 0.0
 
     def refresh_tcp_status(self):
         for cfg in self.vehicle.controllers:
@@ -629,6 +733,15 @@ class TUI:
                     self.debug_msgs[cfg.name] = f"TCP ok ({latency_ms:.1f} ms)"
                 else:
                     self.debug_msgs[cfg.name] = "TCP ok"
+
+        for name, host, port in self.appcfg.display_latency_hosts:
+            ok, latency_ms, why = check_tcp(host, port, self.args.timeout)
+            self.display_latency[name] = {
+                "latency": f"{latency_ms:.1f} ms" if latency_ms is not None else "-- ms",
+                "status": "OK" if ok else f"TCP {why or 'fail'}",
+                "host": host,
+                "port": str(port),
+            }
 
     def draw_header(self, row: int) -> int:
         title = f"Vehicle Modbus Monitor — {self.vehicle.name} (q: quit, r: reconnect, d: debug)"
@@ -656,6 +769,13 @@ class TUI:
         for cfg in self.vehicle.controllers:
             msg = self.debug_msgs.get(cfg.name, "")
             addstr_clip(self.stdscr, row, 2, f"{cfg.name}: {msg}", curses.color_pair(Colors.WHITE))
+            row += 1
+        if self.appcfg.display_latency_hosts:
+            addstr_clip(self.stdscr, row, 2, f"Display latency: {self.display_latency}", curses.color_pair(Colors.WHITE))
+            row += 1
+        if self.appcfg.wifi_iface:
+            wi_msg = self.wifi_status or {"status": "n/a"}
+            addstr_clip(self.stdscr, row, 2, f"WiFi: {wi_msg}", curses.color_pair(Colors.WHITE))
             row += 1
         return row
 
@@ -740,8 +860,24 @@ class TUI:
                     status_txt = "ON " if val else "OFF"
                     attr = curses.color_pair(Colors.GREEN) | curses.A_BOLD if val else 0
                 addstr_clip(self.stdscr, row, 2, f"DI{di_num:>2}:{label} : {status_txt}", attr)
-                row += 1
+            row += 1
 
+        return row
+
+    def render_display_latency(self, row: int) -> int:
+        if not self.appcfg.display_latency_hosts:
+            return row
+        addstr_clip(self.stdscr, row, 0, "Latency checks:", curses.color_pair(Colors.YELLOW) | curses.A_BOLD)
+        row += 1
+        for name, host, port in self.appcfg.display_latency_hosts:
+            info = self.display_latency.get(name, {})
+            status = info.get("status", "no data")
+            latency_txt = info.get("latency", "-- ms")
+            target = f"{host}:{port}"
+            col = curses.color_pair(Colors.GREEN) if status == "OK" else curses.color_pair(Colors.RED)
+            text = f"  {name} ({target}): {status} {latency_txt}"
+            addstr_clip(self.stdscr, row, 0, text, col)
+            row += 1
         return row
 
     def render_gnss(self, row: int) -> int:
@@ -768,6 +904,38 @@ class TUI:
         addstr_clip(self.stdscr, row + 1, 0, f"Pos: {lat_txt}, {lon_txt}", curses.color_pair(Colors.CYAN))
         return row + 2
 
+    def refresh_wifi_status(self):
+        if not self.appcfg.wifi_iface:
+            return
+        self.wifi_status = get_wifi_status(self.appcfg.wifi_iface)
+
+    def render_wifi(self, row: int) -> int:
+        if not self.appcfg.wifi_iface:
+            return row
+        status = self.wifi_status or {"status": "no data"}
+        iface = self.appcfg.wifi_iface
+        st = status.get("status")
+        if st == "connected":
+            sig = status.get("signal") or "-- dBm"
+            ssid = status.get("ssid") or "(ssid ?)"
+            bssid = status.get("bssid") or "--"
+            freq = status.get("freq")
+            freq_txt = f", {freq}" if freq else ""
+            text = f"WiFi {iface}: connected, {sig}, SSID {ssid}, BSSID {bssid}{freq_txt}"
+            attr = curses.color_pair(Colors.GREEN)
+        elif st in ("down", "error"):
+            reason = status.get("error") or st
+            text = f"WiFi {iface}: down ({reason})"
+            attr = curses.color_pair(Colors.RED)
+        elif st == "no link":
+            text = f"WiFi {iface}: no link"
+            attr = curses.color_pair(Colors.YELLOW)
+        else:
+            text = f"WiFi {iface}: {st}" if st else f"WiFi {iface}: unknown"
+            attr = curses.color_pair(Colors.CYAN)
+        addstr_clip(self.stdscr, row, 0, text, attr)
+        return row + 1
+
     def loop(self):
         try:
             while True:
@@ -787,6 +955,10 @@ class TUI:
                     self.refresh_tcp_status()
                     self.last_net_check_time = now
 
+                if self.appcfg.wifi_iface and self.wifi_refresh_interval and now - self.last_wifi_check_time >= self.wifi_refresh_interval:
+                    self.refresh_wifi_status()
+                    self.last_wifi_check_time = now
+
                 if now - self.last_poll_time < self.args.poll:
                     time.sleep(0.05)
                     continue
@@ -803,6 +975,8 @@ class TUI:
                     row = self.render_controller_points(row, cfg)
                     row += 1
 
+                row = self.render_display_latency(row)
+                row = self.render_wifi(row)
                 row = self.render_gnss(row)
 
                 addstr_clip(self.stdscr, row, 0, f"Polling {int(self.args.poll*1000)} ms | Unit IDs {self.args.unit_candidates} | Coils fallback: {self.args.coils} | pymodbus {PYMODBUS_VERSION}", curses.color_pair(Colors.MAGENTA))
