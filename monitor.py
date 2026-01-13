@@ -91,6 +91,7 @@ import threading
 import json as jsonlib
 from pathlib import Path
 from datetime import datetime, timezone
+from collections import deque
 
 import jinja2
 from aiohttp import WSMsgType, web
@@ -106,6 +107,7 @@ DEFAULT_MODBUS_PORT = 502
 DEFAULT_TIMEOUT = 2.5
 DEFAULT_UNIT_CANDIDATES = [1, 255, 0]
 DEFAULT_COILS_FALLBACK = True
+HISTORY_WINDOW_SEC = 600
 
 # ---------------- Data models ----------------
 @dataclass
@@ -154,8 +156,19 @@ class AppState:
         self.controllers: Dict[str, Dict[str, Any]] = {}
         self.gnss: Optional[Dict[str, Any]] = None
         self.wifi: Optional[Dict[str, Any]] = None
-        self.display_latency: Dict[str, Dict[str, Optional[str]]] = {}
+        self.cpu_load: Optional[float] = None
+        self.display_latency: Dict[str, Dict[str, Any]] = {}
         self.last_update: float = 0.0
+        self.history: Dict[str, Any] = {
+            "modbus_latency": {},
+            "gateway_latency": {},
+            "wifi": {
+                "signal_dbm": deque(),
+                "tx_rate_mbps": deque(),
+                "rx_rate_mbps": deque(),
+            },
+            "cpu_load": deque(),
+        }
 
         for cfg in self.vehicle.controllers:
             point_meta = {}
@@ -179,13 +192,40 @@ class AppState:
                 "extra": {},
             }
 
+    def _append_history(self, series: deque, value: Optional[float], now: Optional[float] = None) -> None:
+        if value is None:
+            return
+        ts = now if now is not None else time.time()
+        series.append({"ts": ts, "value": value})
+        cutoff = ts - HISTORY_WINDOW_SEC
+        while series and series[0]["ts"] < cutoff:
+            series.popleft()
+
+    def _history_snapshot(self) -> Dict[str, Any]:
+        modbus_latency = {name: list(series) for name, series in self.history["modbus_latency"].items()}
+        gateway_latency = {name: list(series) for name, series in self.history["gateway_latency"].items()}
+        wifi_history = {
+            "signal_dbm": list(self.history["wifi"]["signal_dbm"]),
+            "tx_rate_mbps": list(self.history["wifi"]["tx_rate_mbps"]),
+            "rx_rate_mbps": list(self.history["wifi"]["rx_rate_mbps"]),
+        }
+        cpu_load = list(self.history["cpu_load"])
+        return {
+            "modbus_latency": modbus_latency,
+            "gateway_latency": gateway_latency,
+            "wifi": wifi_history,
+            "cpu_load": cpu_load,
+        }
+
     def snapshot(self) -> Dict[str, Any]:
         with self.lock:
             return {
                 "controllers": jsonlib.loads(jsonlib.dumps(self.controllers)),
                 "gnss": jsonlib.loads(jsonlib.dumps(self.gnss)) if self.gnss is not None else None,
                 "wifi": jsonlib.loads(jsonlib.dumps(self.wifi)) if self.wifi is not None else None,
+                "cpu_load": self.cpu_load,
                 "display_latency": jsonlib.loads(jsonlib.dumps(self.display_latency)),
+                "history": self._history_snapshot(),
                 "last_update": self.last_update,
                 "vehicle": self.vehicle.name,
             }
@@ -195,6 +235,9 @@ class AppState:
             if name not in self.controllers:
                 self.controllers[name] = {}
             self.controllers[name].update(kwargs)
+            if "latency" in kwargs:
+                series = self.history["modbus_latency"].setdefault(name, deque())
+                self._append_history(series, kwargs.get("latency"))
             self.last_update = time.time()
             self.update_event.set()
             self.log_event.set()
@@ -209,13 +252,30 @@ class AppState:
     def set_wifi(self, snap: Optional[Dict[str, Any]]):
         with self.lock:
             self.wifi = snap
+            if snap:
+                self._append_history(self.history["wifi"]["signal_dbm"], snap.get("signal_dbm"))
+                self._append_history(self.history["wifi"]["tx_rate_mbps"], snap.get("tx_rate_mbps"))
+                self._append_history(self.history["wifi"]["rx_rate_mbps"], snap.get("rx_rate_mbps"))
             self.last_update = time.time()
             self.update_event.set()
             self.log_event.set()
 
-    def set_display_latency(self, data: Dict[str, Dict[str, Optional[str]]]):
+    def set_display_latency(self, data: Dict[str, Dict[str, Any]]):
         with self.lock:
             self.display_latency = data
+            now = time.time()
+            for name, info in data.items():
+                series = self.history["gateway_latency"].setdefault(name, deque())
+                latency_ms = info.get("latency_ms")
+                self._append_history(series, latency_ms, now=now)
+            self.last_update = time.time()
+            self.update_event.set()
+            self.log_event.set()
+
+    def set_cpu_load(self, load: Optional[float]):
+        with self.lock:
+            self.cpu_load = load
+            self._append_history(self.history["cpu_load"], load)
             self.last_update = time.time()
             self.update_event.set()
             self.log_event.set()
@@ -536,7 +596,7 @@ def _freq_to_channel(freq_mhz: Optional[int]) -> Optional[int]:
     return None
 
 
-def get_wifi_status(interface: str) -> Dict[str, Optional[str]]:
+def get_wifi_status(interface: str) -> Dict[str, Optional[Any]]:
     """Return WiFi link details parsed from `iw dev <iface> link` output."""
     cmd = ["iw", "dev", interface, "link"]
     try:
@@ -556,6 +616,9 @@ def get_wifi_status(interface: str) -> Dict[str, Optional[str]]:
     bssid = None
     signal = None
     freq = None
+    signal_dbm: Optional[float] = None
+    tx_rate_mbps: Optional[float] = None
+    rx_rate_mbps: Optional[float] = None
     for line in stdout.splitlines():
         line = line.strip()
         if line.startswith("Connected to"):
@@ -573,6 +636,18 @@ def get_wifi_status(interface: str) -> Dict[str, Optional[str]]:
             match = re.search(r"(-?\d+\s*dBm)", line)
             if match:
                 signal = match.group(1)
+                try:
+                    signal_dbm = float(match.group(1).split()[0])
+                except Exception:
+                    signal_dbm = None
+        elif "bitrate:" in line:
+            match = re.search(r"^(tx|rx)\s+bitrate:\s*([0-9.]+)\s*MBit/s", line)
+            if match:
+                rate = float(match.group(2))
+                if match.group(1) == "tx":
+                    tx_rate_mbps = rate
+                else:
+                    rx_rate_mbps = rate
 
     chan = _freq_to_channel(freq)
     freq_txt = f"{freq} MHz" if freq is not None else None
@@ -584,9 +659,20 @@ def get_wifi_status(interface: str) -> Dict[str, Optional[str]]:
         "ssid": ssid,
         "bssid": bssid,
         "signal": signal,
+        "signal_dbm": signal_dbm,
         "freq": freq_txt,
+        "tx_rate_mbps": tx_rate_mbps,
+        "rx_rate_mbps": rx_rate_mbps,
     }
     return status
+
+
+def get_cpu_load() -> Optional[float]:
+    try:
+        load1, _, _ = os.getloadavg()
+        return float(load1)
+    except Exception:
+        return None
 
 # ---------------- Pymodbus call helper ----------------
 def call_bits(method, address: int, count: int, unit: int):
@@ -878,11 +964,12 @@ class Poller:
                 self.debug_msgs[cfg.name] = f"TCP ok ({latency_ms:.1f} ms)" if latency_ms is not None else "TCP ok"
             self.state.set_controller(cfg.name, latency=latency_ms, status=self.status[cfg.name], debug=self.debug_msgs.get(cfg.name, ""))
 
-        display_latency: Dict[str, Dict[str, Optional[str]]] = {}
+        display_latency: Dict[str, Dict[str, Any]] = {}
         for name, host, port in self.appcfg.display_latency_hosts:
             ok, latency_ms, why = check_tcp(host, port, self.args.timeout)
             display_latency[name] = {
                 "latency": f"{latency_ms:.1f} ms" if latency_ms is not None else "-- ms",
+                "latency_ms": latency_ms,
                 "status": "OK" if ok else f"TCP {why or 'fail'}",
                 "host": host,
                 "port": str(port),
@@ -950,6 +1037,7 @@ class Poller:
             self.last_wifi_check_time = now
 
         self.refresh_gnss()
+        self.state.set_cpu_load(get_cpu_load())
 
     def start(self):
         self.thread = threading.Thread(target=self._loop, daemon=True)
