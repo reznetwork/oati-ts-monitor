@@ -359,7 +359,7 @@ def load_config(path: str) -> AppCfg:
     with open(path, 'r', encoding='utf-8') as f:
         raw = json.load(f)
 
-    port = int(raw.get('pymodbus', {}).get('port', DEFAULT_MODBUS_PORT))
+    modbus_port = int(raw.get('pymodbus', {}).get('port', DEFAULT_MODBUS_PORT))
     timeout = float(raw.get('pymodbus', {}).get('timeout', DEFAULT_TIMEOUT))
     unit_candidates = list(raw.get('pymodbus', {}).get('unitCandidates', DEFAULT_UNIT_CANDIDATES))
     coils_fallback = bool(raw.get('pymodbus', {}).get('coilsFallback', DEFAULT_COILS_FALLBACK))
@@ -385,8 +385,8 @@ def load_config(path: str) -> AppCfg:
         try:
             name = str(entry.get('name') or entry.get('label') or entry.get('host') or 'host')
             host = str(entry['host'])
-            port = int(entry.get('port', port))
-            latency_hosts.append((name, host, port))
+            host_port = int(entry.get('port', modbus_port))
+            latency_hosts.append((name, host, host_port))
         except Exception:
             continue
 
@@ -411,7 +411,7 @@ def load_config(path: str) -> AppCfg:
         vehicles.append(VehicleCfg(name=str(v.get('name', 'vehicle')), controllers=ctrls))
 
     return AppCfg(
-        port=port,
+        port=modbus_port,
         timeout=timeout,
         unit_candidates=unit_candidates,
         coils_fallback=coils_fallback,
