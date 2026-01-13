@@ -1073,6 +1073,33 @@ def addstr_clip(win, y: int, x: int, text: str, attr: int = 0):
     except curses.error:
         pass
 
+SPARK_CHARS = "▁▂▃▄▅▆▇█"
+
+def _sparkline(series: List[Dict[str, Any]], width: int) -> str:
+    if width <= 0:
+        return ""
+    values = [item.get("value") for item in series if isinstance(item, dict) and isinstance(item.get("value"), (int, float))]
+    if not values:
+        return "no data"
+    values = values[-width:]
+    min_val = min(values)
+    max_val = max(values)
+    span = max_val - min_val
+    if span == 0:
+        return SPARK_CHARS[-1] * len(values)
+    chars = []
+    for val in values:
+        idx = int(round((val - min_val) / span * (len(SPARK_CHARS) - 1)))
+        chars.append(SPARK_CHARS[idx])
+    return "".join(chars)
+
+def _last_numeric(series: List[Dict[str, Any]]) -> Optional[float]:
+    for item in reversed(series):
+        val = item.get("value") if isinstance(item, dict) else None
+        if isinstance(val, (int, float)):
+            return val
+    return None
+
 # Color policy
 class Colors:
     GREEN = 1
@@ -1116,6 +1143,7 @@ class TUI:
         self.poller = poller
         self.datalogger = datalogger
         self.show_debug = False
+        self.show_charts = False
 
         curses.curs_set(0)
         self.stdscr.nodelay(True)
@@ -1131,7 +1159,7 @@ class TUI:
     def draw_header(self, row: int, snap: dict) -> int:
         ts = snap.get("last_update") or 0.0
         age = time.time() - ts if ts else 0.0
-        title = f"Vehicle Modbus Monitor — {self.vehicle.name} (q: quit, r: reconnect, d: debug)"
+        title = f"Vehicle Modbus Monitor — {self.vehicle.name} (q: quit, r: reconnect, d: debug, c: charts)"
         addstr_clip(self.stdscr, row, 0, title, curses.color_pair(Colors.YELLOW) | curses.A_BOLD)
         addstr_clip(self.stdscr, row, max(len(title) + 2, 50), f"Age {age:.1f}s", curses.color_pair(Colors.CYAN))
         return row + 1
@@ -1307,6 +1335,59 @@ class TUI:
         addstr_clip(self.stdscr, row, 0, f"{label} {filler}", curses.color_pair(Colors.WHITE) | curses.A_BOLD)
         return row + 1
 
+    def _draw_chart_line(self, row: int, label: str, series: List[Dict[str, Any]], unit: str) -> int:
+        last_val = _last_numeric(series)
+        last_txt = f"{last_val:.1f}{unit}" if isinstance(last_val, (int, float)) else "--"
+        spark_width = max(10, curses.COLS - len(label) - len(last_txt) - 5)
+        spark = _sparkline(series, spark_width)
+        text = f"{label}: {spark} {last_txt}"
+        addstr_clip(self.stdscr, row, 0, text, curses.color_pair(Colors.CYAN))
+        return row + 1
+
+    def render_charts(self, row: int, snap: dict) -> int:
+        history = snap.get("history") or {}
+        has_any = False
+
+        modbus = history.get("modbus_latency", {}) or {}
+        if modbus:
+            has_any = True
+            row = self.draw_section_divider(row, "Modbus latency (ms)")
+            for name, series in modbus.items():
+                row = self._draw_chart_line(row, name, series, "ms")
+
+        gateway = history.get("gateway_latency", {}) or {}
+        if gateway:
+            has_any = True
+            row = self.draw_section_divider(row, "Gateway latency (ms)")
+            for name, series in gateway.items():
+                row = self._draw_chart_line(row, name, series, "ms")
+
+        wifi = history.get("wifi", {}) or {}
+        wifi_signal = wifi.get("signal_dbm", []) or []
+        wifi_tx = wifi.get("tx_rate_mbps", []) or []
+        wifi_rx = wifi.get("rx_rate_mbps", []) or []
+        if wifi_signal or wifi_tx or wifi_rx:
+            has_any = True
+            row = self.draw_section_divider(row, "WiFi")
+            if wifi_signal:
+                row = self._draw_chart_line(row, "Signal", wifi_signal, " dBm")
+            if wifi_tx:
+                row = self._draw_chart_line(row, "TX rate", wifi_tx, " Mbps")
+            if wifi_rx:
+                row = self._draw_chart_line(row, "RX rate", wifi_rx, " Mbps")
+
+        cpu = history.get("cpu_load", []) or []
+        if cpu:
+            has_any = True
+            row = self.draw_section_divider(row, "CPU load")
+            row = self._draw_chart_line(row, "CPU", cpu, "")
+
+        if not has_any:
+            addstr_clip(self.stdscr, row, 0, "No history samples yet.", curses.color_pair(Colors.RED))
+            row += 1
+
+        return row
+
     def loop(self):
         try:
             while True:
@@ -1317,6 +1398,8 @@ class TUI:
                     self.show_debug = not self.show_debug
                 if ch == ord('r'):
                     self.poller.request_reconnect()
+                if ch == ord('c'):
+                    self.show_charts = not self.show_charts
 
                 snap = self.state.snapshot()
                 self.stdscr.erase()
@@ -1324,16 +1407,20 @@ class TUI:
                 row = self.draw_header(row, snap)
                 row = self.draw_status_line(row, snap)
                 row = self.draw_debug(row, snap)
-                row = self.draw_section_divider(row, "Modbus data")
-                addstr_clip(self.stdscr, row, 0, f"Polling {int(self.args.poll*1000)} ms | Unit IDs {self.args.unit_candidates} | Coils fallback: {self.args.coils} | pymodbus {PYMODBUS_VERSION}", curses.color_pair(Colors.MAGENTA))
-                row += 1
-                for cfg in self.vehicle.controllers:
-                    row = self.render_controller_points(row, cfg, snap)
-                row = self.render_display_latency(row, snap)
-                row = self.draw_section_divider(row, "GNSS data")
-                row = self.render_gnss(row, snap)
-                row = self.draw_section_divider(row, "WiFi data")
-                row = self.render_wifi(row, snap)
+                if self.show_charts:
+                    row = self.draw_section_divider(row, "Charts (last 10 min)")
+                    row = self.render_charts(row, snap)
+                else:
+                    row = self.draw_section_divider(row, "Modbus data")
+                    addstr_clip(self.stdscr, row, 0, f"Polling {int(self.args.poll*1000)} ms | Unit IDs {self.args.unit_candidates} | Coils fallback: {self.args.coils} | pymodbus {PYMODBUS_VERSION}", curses.color_pair(Colors.MAGENTA))
+                    row += 1
+                    for cfg in self.vehicle.controllers:
+                        row = self.render_controller_points(row, cfg, snap)
+                    row = self.render_display_latency(row, snap)
+                    row = self.draw_section_divider(row, "GNSS data")
+                    row = self.render_gnss(row, snap)
+                    row = self.draw_section_divider(row, "WiFi data")
+                    row = self.render_wifi(row, snap)
                 self.stdscr.refresh()
 
                 time.sleep(self.args.poll)

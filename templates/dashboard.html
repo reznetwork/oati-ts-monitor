@@ -26,6 +26,9 @@
     .style-seatbelt { --on:#4caf50; --off:#f44336; }
     .style-engine { --on:#4caf50; --off:#f44336; }
     .style-indicator { --on:#ffeb3b; --off:#cfd8dc; }
+    .chart-header { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+    .chart-value { color: #9ad1d4; font-size: 14px; }
+    .chart-canvas { width: 100%; height: 120px; background: #0d1c22; border: 1px solid #1c3a43; border-radius: 4px; }
     code { background: #0e1a1f; padding: 2px 4px; border-radius: 3px; }
   </style>
 </head>
@@ -33,6 +36,7 @@
   <header>Vehicle Monitor — <span id="vehicleName"></span> <small id="age"></small></header>
   <main>
     <section id="latency"></section>
+    <section class="grid" id="history"></section>
     <section class="grid" id="controllers"></section>
     <section id="gnss"></section>
     <section id="wifi"></section>
@@ -43,6 +47,7 @@
     const ageEl = document.getElementById('age');
     const controllersEl = document.getElementById('controllers');
     const latencyEl = document.getElementById('latency');
+    const historyEl = document.getElementById('history');
     const gnssEl = document.getElementById('gnss');
     const wifiEl = document.getElementById('wifi');
 
@@ -132,12 +137,107 @@
       wifiEl.innerHTML = html;
     }
 
+    function lastNumeric(series) {
+      if (!Array.isArray(series)) return null;
+      for (let i = series.length - 1; i >= 0; i -= 1) {
+        const val = series[i]?.value;
+        if (typeof val === 'number') return val;
+      }
+      return null;
+    }
+
+    function drawSeries(canvas, series, color) {
+      const ctx = canvas.getContext('2d');
+      const w = canvas.width;
+      const h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = '#0d1c22';
+      ctx.fillRect(0, 0, w, h);
+      const points = (series || []).filter((item) => typeof item?.value === 'number');
+      if (!points.length) {
+        ctx.fillStyle = '#9e9e9e';
+        ctx.font = '12px sans-serif';
+        ctx.fillText('no data', 10, 20);
+        return;
+      }
+      const values = points.map((p) => p.value);
+      const minVal = Math.min(...values);
+      const maxVal = Math.max(...values);
+      const span = maxVal - minVal || 1;
+      const view = points.slice(-120);
+      ctx.strokeStyle = color || '#4caf50';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      view.forEach((p, i) => {
+        const x = (i / Math.max(view.length - 1, 1)) * (w - 20) + 10;
+        const y = h - 10 - ((p.value - minVal) / span) * (h - 20);
+        if (i === 0) {
+          ctx.moveTo(x, y);
+        } else {
+          ctx.lineTo(x, y);
+        }
+      });
+      ctx.stroke();
+      ctx.fillStyle = '#9ad1d4';
+      ctx.font = '10px sans-serif';
+      ctx.fillText(minVal.toFixed(1), 8, h - 4);
+      ctx.fillText(maxVal.toFixed(1), 8, 12);
+    }
+
+    function renderHistory(history) {
+      historyEl.innerHTML = '';
+      if (!history) return;
+      const makeCard = (title, series, unit, color) => {
+        const card = document.createElement('div');
+        card.className = 'card';
+        const header = document.createElement('div');
+        header.className = 'chart-header';
+        const heading = document.createElement('h3');
+        heading.textContent = title;
+        const valueEl = document.createElement('div');
+        valueEl.className = 'chart-value';
+        const lastVal = lastNumeric(series);
+        valueEl.textContent = lastVal === null ? '--' : `${lastVal.toFixed(1)}${unit}`;
+        header.appendChild(heading);
+        header.appendChild(valueEl);
+        const canvas = document.createElement('canvas');
+        canvas.className = 'chart-canvas';
+        canvas.width = 320;
+        canvas.height = 120;
+        card.appendChild(header);
+        card.appendChild(canvas);
+        drawSeries(canvas, series, color);
+        historyEl.appendChild(card);
+      };
+
+      for (const [name, series] of Object.entries(history.modbus_latency || {})) {
+        makeCard(`Modbus latency ${name}`, series, ' ms', '#4caf50');
+      }
+      for (const [name, series] of Object.entries(history.gateway_latency || {})) {
+        makeCard(`Gateway latency ${name}`, series, ' ms', '#ff9800');
+      }
+      const wifi = history.wifi || {};
+      if (wifi.signal_dbm?.length) {
+        makeCard('WiFi signal', wifi.signal_dbm, ' dBm', '#03a9f4');
+      }
+      if (wifi.tx_rate_mbps?.length) {
+        makeCard('WiFi TX rate', wifi.tx_rate_mbps, ' Mbps', '#8bc34a');
+      }
+      if (wifi.rx_rate_mbps?.length) {
+        makeCard('WiFi RX rate', wifi.rx_rate_mbps, ' Mbps', '#cddc39');
+      }
+      if (history.cpu_load?.length) {
+        makeCard('CPU load', history.cpu_load, '', '#e91e63');
+      }
+    }
+
     function render(state) {
       vehicleEl.textContent = state.vehicle || 'vehicle';
       const ageSecs = state.last_update ? (Date.now()/1000 - state.last_update).toFixed(1) : 'n/a';
       ageEl.textContent = `(age ${ageSecs}s)`;
       renderControllers(state.controllers || {});
       renderLatency(state.display_latency || {});
+      renderHistory(state.history);
       renderGnss(state.gnss);
       renderWifi(state.wifi);
     }
