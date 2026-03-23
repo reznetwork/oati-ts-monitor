@@ -10,30 +10,29 @@
     "coilsFallback": true
   },
   "gnss": {
-    "host": "172.16.103.3",
+    "host": "192.168.1.50",
     "port": 2947
   },
   "wifi": {
-    "interface": "wlan0",
+    "interface": "wlp2s0",
     "refreshSeconds": 2
   },
   "display": {
     "latencyHosts": [
       {
         "name": "gateway",
-	"port": 80,
-        "host": "10.3.102.129"
+        "host": "192.168.1.1"
       }
     ]
   },
   "vehicles": [
     {
-      "name": "eLoader #1",
+      "name": "Tractor A",
       "controllers": [
         {
           "name": "MB_IO_1",
           "model": "ICPDAS ET-7002",
-          "host": "172.16.103.4",
+          "host": "172.16.102.4",
           "base": 10000,
           "points": [
             {
@@ -59,7 +58,7 @@
         {
           "name": "MB_IO_2",
           "model": "ICPDAS ET-7051",
-          "host": "172.16.103.5",
+          "host": "172.16.102.5",
           "base": 10000,
           "points": [
             {
@@ -85,6 +84,28 @@
               "label": "Гудок"
             }
           ]
+        },
+        {
+          "name": "MB_IO_3",
+          "host": "172.16.102.8",
+          "base": 10001,
+          "gear_points": {
+            "10001": "N",
+            "10002": "F1",
+            "10003": "F2",
+            "10004": "F3",
+            "10005": "F4",
+            "10006": "F5",
+            "10007": "F6",
+            "10008": "F7",
+            "10009": "F8",
+            "10010": "F9",
+            "10021": "R1",
+            "10022": "R2"
+          },
+          "extra_points": {
+            "10023": "&&"
+          }
         }
       ]
     }
