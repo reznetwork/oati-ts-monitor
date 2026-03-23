@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+from __future__ import annotations
 """
 Vehicle Modbus Monitor — Discrete Inputs (ncurses TUI) with external JSON config
 Compatible with pymodbus 3.11.x signature style (address positional, others keyword-only).
@@ -77,7 +78,46 @@ JSON config (save as monitor_config.json)
 import asyncio
 import json
 import time
-import curses
+try:
+    import curses
+except ModuleNotFoundError:  # pragma: no cover - Windows without curses
+    class _DummyCurses:
+        error = Exception
+        A_BOLD = 0
+        COLOR_GREEN = 2
+        COLOR_RED = 1
+        COLOR_YELLOW = 3
+        COLOR_CYAN = 6
+        COLOR_MAGENTA = 5
+        COLOR_WHITE = 7
+        COLS = 120
+        LINES = 40
+
+        @staticmethod
+        def wrapper(_fn):
+            raise RuntimeError("curses is not available on this platform")
+
+        @staticmethod
+        def color_pair(_idx):
+            return 0
+
+        @staticmethod
+        def curs_set(_v):
+            return None
+
+        @staticmethod
+        def start_color():
+            return None
+
+        @staticmethod
+        def use_default_colors():
+            return None
+
+        @staticmethod
+        def init_pair(_a, _b, _c):
+            return None
+
+    curses = _DummyCurses()
 import socket
 import locale
 import argparse
@@ -85,6 +125,7 @@ import logging
 import os
 import re
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional, Any
 import threading
@@ -93,10 +134,21 @@ from pathlib import Path
 from datetime import datetime, timezone
 from collections import deque
 
-import jinja2
-from aiohttp import WSMsgType, web
-from pymodbus.client import ModbusTcpClient
-from pymodbus import __version__ as PYMODBUS_VERSION
+try:
+    import jinja2
+except ModuleNotFoundError:  # pragma: no cover
+    jinja2 = None
+try:
+    from aiohttp import WSMsgType, web
+except ModuleNotFoundError:  # pragma: no cover
+    WSMsgType = None
+    web = None
+try:
+    from pymodbus.client import ModbusTcpClient
+    from pymodbus import __version__ as PYMODBUS_VERSION
+except ModuleNotFoundError:  # pragma: no cover
+    ModbusTcpClient = None
+    PYMODBUS_VERSION = "unavailable"
 
 # UTF-8 for Russian labels
 locale.setlocale(locale.LC_ALL, '')
@@ -696,6 +748,8 @@ def call_bits(method, address: int, count: int, unit: int):
 # ---------------- Modbus client wrapper ----------------
 class MBClient:
     def __init__(self, host: str, port: int, timeout: float, unit_candidates: List[int], use_coils_fallback: bool):
+        if ModbusTcpClient is None:
+            raise RuntimeError("pymodbus is required to run Modbus polling")
         self.host = host
         self.port = port
         self.timeout = timeout
@@ -1433,6 +1487,8 @@ TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 
 class WebServer:
     def __init__(self, state: AppState, host: str, port: int, broadcast_interval: float = 1.0):
+        if jinja2 is None or web is None:
+            raise RuntimeError("aiohttp and jinja2 are required for HTTP mode")
         self.state = state
         self.host = host
         self.port = port
@@ -1617,6 +1673,20 @@ def pick_vehicle(appcfg: AppCfg, selector: Optional[str]) -> VehicleCfg:
 
 
 def main():
+    # Compatibility launcher for split architecture.
+    if len(sys.argv) >= 2 and sys.argv[1] in {"daemon", "client"}:
+        mode = sys.argv[1]
+        forwarded = [sys.argv[0]] + sys.argv[2:]
+        if mode == "daemon":
+            from daemon_runtime import build_daemon_parser, run_daemon
+            parser = build_daemon_parser()
+            args = parser.parse_args(forwarded[1:])
+            return run_daemon(args)
+        from client_runtime import build_client_parser, run_client
+        parser = build_client_parser()
+        args = parser.parse_args(forwarded[1:])
+        return run_client(args)
+
     args = parse_args()
     # Silence noisy library logs unless verbose is requested
     silence_lib_logs(args.verbose)
