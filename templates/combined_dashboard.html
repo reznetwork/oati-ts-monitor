@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Vehicle Monitor - Combined Graph</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #0b1e24; color: #e8f1f2; margin: 0; padding: 0; }
+    header { background: #12313b; padding: 10px 16px 8px 16px; font-size: 20px; position: sticky; top: 0; z-index: 1000; border-bottom: 1px solid #1c3a43; }
+    .topbar-title { display: flex; align-items: center; gap: 10px; }
+    .topbar-status { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 8px; font-size: 13px; align-items: center; }
+    .topbar-log-controls { margin-top: 8px; display: flex; align-items: center; gap: 10px; }
+    .pill { background: #0d1c22; border: 1px solid #1c3a43; border-radius: 999px; padding: 4px 8px; white-space: nowrap; }
+    .status-ok { color: #4caf50; }
+    .status-bad { color: #f44336; }
+    .log-status-on { color: #4caf50; font-weight: 700; }
+    .log-status-off { color: #f44336; font-weight: 700; }
+    .log-btn { height: 34px; border-radius: 8px; border: 1px solid #2a5663; background: linear-gradient(180deg, #1a4b59 0%, #123944 100%); color: #e8f1f2; font-weight: 700; padding: 0 14px; cursor: pointer; }
+    main { padding: 12px 16px 16px 16px; }
+    .card { background: #11232b; border: 1px solid #1c3a43; border-radius: 6px; padding: 12px; }
+    .chart-canvas { width: 100%; height: 420px; background: #0d1c22; border: 1px solid #1c3a43; border-radius: 4px; }
+    .legend { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 10px; font-size: 12px; }
+    .legend-item { display: inline-flex; align-items: center; gap: 6px; }
+    .swatch { width: 14px; height: 3px; border-radius: 2px; display: inline-block; }
+    a { color: #9ad1d4; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="topbar-title">Vehicle Monitor — <span id="vehicleName"></span> <small id="age"></small> <a href="/">Dashboard</a> <a href="/wifilogs">WiFi logs</a></div>
+    <div class="topbar-status" id="topbarStatus"></div>
+    <div class="topbar-log-controls">
+      <span id="logStatusBadge">Log: OFF</span>
+      <button id="toggleWifiLog" class="log-btn">Start log</button>
+    </div>
+  </header>
+  <main>
+    <div class="card">
+      <h3>Combined WiFi + Gateway Trend</h3>
+      <canvas id="combinedCanvas" class="chart-canvas" width="1200" height="420"></canvas>
+      <div class="legend" id="legend"></div>
+    </div>
+  </main>
+  <script>
+    const state = {{ initial_state | safe }};
+    const vehicleEl = document.getElementById('vehicleName');
+    const ageEl = document.getElementById('age');
+    const topbarStatusEl = document.getElementById('topbarStatus');
+    const logStatusBadgeEl = document.getElementById('logStatusBadge');
+    const toggleWifiLogBtn = document.getElementById('toggleWifiLog');
+    const legendEl = document.getElementById('legend');
+    const canvas = document.getElementById('combinedCanvas');
+    let wsConn = null;
+    let currentLogEnabled = false;
+
+    function sanitizeGraphValue(v) {
+      if (typeof v !== 'number' || Number.isNaN(v) || !Number.isFinite(v)) return null;
+      if (v < -1000) return -1;
+      return v;
+    }
+
+    function latencyMsInt(v) {
+      if (typeof v !== 'number' || Number.isNaN(v)) return '--';
+      return `${Math.round(v)} ms`;
+    }
+
+    function seriesRate(series) {
+      if (!Array.isArray(series) || series.length < 2) return [];
+      const out = [];
+      for (let i = 1; i < series.length; i += 1) {
+        const prev = series[i - 1];
+        const cur = series[i];
+        if (typeof prev?.value !== 'number' || typeof cur?.value !== 'number') continue;
+        if (typeof prev?.ts !== 'number' || typeof cur?.ts !== 'number') continue;
+        const dt = cur.ts - prev.ts;
+        if (dt <= 0) continue;
+        const rate = (cur.value - prev.value) / dt / 1024.0;
+        out.push({ ts: cur.ts, value: sanitizeGraphValue(rate) ?? -1 });
+      }
+      return out;
+    }
+
+    function norm(series) {
+      const vals = (series || []).map((p) => sanitizeGraphValue(p?.value)).filter((v) => typeof v === 'number');
+      if (!vals.length) return [];
+      const min = Math.min(...vals);
+      const max = Math.max(...vals);
+      const span = max - min || 1;
+      return (series || [])
+        .map((p) => {
+          const v = sanitizeGraphValue(p?.value);
+          if (typeof v !== 'number' || typeof p?.ts !== 'number') return null;
+          return { ts: p.ts, value: (v - min) / span };
+        })
+        .filter(Boolean);
+    }
+
+    function drawCombined(state) {
+      const ctx = canvas.getContext('2d');
+      const w = canvas.width;
+      const h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = '#0d1c22';
+      ctx.fillRect(0, 0, w, h);
+
+      const history = state.history || {};
+      const wifi = history.wifi || {};
+      const gatewaySeries = Object.values(history.gateway_latency || {})[0] || [];
+      const lines = [
+        { name: 'WiFi signal', color: '#03a9f4', data: norm(wifi.signal_dbm || []) },
+        { name: 'WiFi TX rate', color: '#8bc34a', data: norm(wifi.tx_rate_mbps || []) },
+        { name: 'WiFi RX rate', color: '#cddc39', data: norm(wifi.rx_rate_mbps || []) },
+        { name: 'WiFi TX throughput', color: '#00acc1', data: norm(seriesRate(wifi.tx_bytes || [])) },
+        { name: 'WiFi RX throughput', color: '#8e24aa', data: norm(seriesRate(wifi.rx_bytes || [])) },
+        { name: 'Gateway latency', color: '#ff9800', data: norm(gatewaySeries) },
+      ];
+
+      let all = [];
+      for (const line of lines) all = all.concat(line.data);
+      if (!all.length) {
+        ctx.fillStyle = '#9e9e9e';
+        ctx.font = '14px sans-serif';
+        ctx.fillText('no data', 12, 24);
+      } else {
+        const tsMin = Math.min(...all.map((p) => p.ts));
+        const tsMax = Math.max(...all.map((p) => p.ts));
+        const tsSpan = tsMax - tsMin || 1;
+        for (const line of lines) {
+          if (!line.data.length) continue;
+          ctx.strokeStyle = line.color;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          line.data.forEach((p, i) => {
+            const x = ((p.ts - tsMin) / tsSpan) * (w - 20) + 10;
+            const y = h - 10 - (p.value * (h - 20));
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          });
+          ctx.stroke();
+        }
+      }
+
+      legendEl.innerHTML = lines
+        .map((l) => `<span class="legend-item"><span class="swatch" style="background:${l.color}"></span>${l.name}</span>`)
+        .join('');
+    }
+
+    function renderTopbarStatus(state) {
+      const pills = [];
+      const latency = state.display_latency || {};
+      const gateway = latency.gateway || Object.values(latency)[0];
+      if (gateway) {
+        const cls = gateway.status === 'OK' ? 'status-ok' : 'status-bad';
+        pills.push(`<span class="pill">gateway: <span class="${cls}">${gateway.status || '--'}</span> ${latencyMsInt(gateway.latency_ms)}</span>`);
+      }
+      for (const [name, info] of Object.entries(state.controllers || {})) {
+        const cls = info.status === 'OK' ? 'status-ok' : 'status-bad';
+        pills.push(`<span class="pill">${name}: <span class="${cls}">${info.status || '--'}</span> ${latencyMsInt(info.latency)}</span>`);
+      }
+      const gnss = state.gnss || {};
+      pills.push(`<span class="pill">GNSS: ${gnss.fix || '--'}</span>`);
+      const wifi = state.wifi || {};
+      const level = wifi.signal || (typeof wifi.signal_dbm === 'number' ? `${Math.round(wifi.signal_dbm)} dBm` : '--');
+      pills.push(`<span class="pill">WiFi: ${wifi.ssid || '--'} ${level}</span>`);
+      topbarStatusEl.innerHTML = pills.join('');
+
+      const logCfg = state.detailed_wifi_logging || {};
+      currentLogEnabled = !!logCfg.enabled;
+      logStatusBadgeEl.className = currentLogEnabled ? 'log-status-on' : 'log-status-off';
+      logStatusBadgeEl.textContent = `Log: ${currentLogEnabled ? 'ON' : 'OFF'}`;
+      if (logCfg.last_error) logStatusBadgeEl.textContent += ` (${logCfg.last_error})`;
+      toggleWifiLogBtn.textContent = currentLogEnabled ? 'Stop log' : 'Start log';
+    }
+
+    function render(state) {
+      vehicleEl.textContent = state.vehicle || 'vehicle';
+      const ageSecs = state.last_update ? (Date.now()/1000 - state.last_update).toFixed(1) : 'n/a';
+      ageEl.textContent = `(age ${ageSecs}s)`;
+      renderTopbarStatus(state);
+      drawCombined(state);
+    }
+
+    function connect() {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      const ws = new WebSocket(`${proto}://${location.host}/ws`);
+      wsConn = ws;
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === 'state') render(msg.data);
+        } catch (_e) {}
+      };
+      ws.onclose = () => setTimeout(connect, 2000);
+    }
+
+    toggleWifiLogBtn.onclick = () => {
+      if (!wsConn || wsConn.readyState !== WebSocket.OPEN) return;
+      wsConn.send(JSON.stringify({ type: 'set_detailed_wifi_logging', enabled: !currentLogEnabled }));
+    };
+
+    render(state);
+    connect();
+  </script>
+</body>
+</html>

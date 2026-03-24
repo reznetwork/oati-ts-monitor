@@ -53,7 +53,7 @@
 </head>
 <body>
   <header>
-    <div class="topbar-title">Vehicle Monitor — <span id="vehicleName"></span> <small id="age"></small> <a href="/wifilogs" style="color:#9ad1d4; margin-left: 12px;">WiFi logs</a></div>
+    <div class="topbar-title">Vehicle Monitor — <span id="vehicleName"></span> <small id="age"></small> <a href="/combined" style="color:#9ad1d4; margin-left: 12px;">Combined graph</a> <a href="/wifilogs" style="color:#9ad1d4; margin-left: 12px;">WiFi logs</a></div>
     <div class="topbar-status" id="topbarStatus"></div>
     <div class="topbar-log-controls">
       <span id="logStatusBadge">Log: OFF</span>
@@ -207,6 +207,13 @@
       return null;
     }
 
+    function sanitizeGraphValue(v) {
+      if (typeof v !== 'number' || Number.isNaN(v) || !Number.isFinite(v)) return null;
+      // Preserve typical negatives (RSSI etc.); clamp overflow-like negative artifacts.
+      if (v < -1000) return -1;
+      return v;
+    }
+
     function drawSeries(canvas, series, color) {
       const ctx = canvas.getContext('2d');
       const w = canvas.width;
@@ -214,7 +221,9 @@
       ctx.clearRect(0, 0, w, h);
       ctx.fillStyle = '#0d1c22';
       ctx.fillRect(0, 0, w, h);
-      const points = (series || []).filter((item) => typeof item?.value === 'number');
+      const points = (series || [])
+        .map((item) => ({ ts: item?.ts, value: sanitizeGraphValue(item?.value) }))
+        .filter((item) => typeof item?.value === 'number');
       if (!points.length) {
         ctx.fillStyle = '#9e9e9e';
         ctx.font = '12px sans-serif';
@@ -258,7 +267,8 @@
           if (typeof prev?.ts !== 'number' || typeof cur?.ts !== 'number') continue;
           const dt = cur.ts - prev.ts;
           if (dt <= 0) continue;
-          out.push({ ts: cur.ts, value: (cur.value - prev.value) / dt / 1024.0 });
+          const rate = (cur.value - prev.value) / dt / 1024.0;
+          out.push({ ts: cur.ts, value: sanitizeGraphValue(rate) ?? -1 });
         }
         return out;
       };

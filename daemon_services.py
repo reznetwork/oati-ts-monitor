@@ -1290,10 +1290,14 @@ class WebServer:
         self.websockets: set = set()
         self.jinja = jinja2.Environment(loader=jinja2.FileSystemLoader(str(TEMPLATE_DIR)), autoescape=True)
         self.template = self.jinja.get_template("dashboard.html")
+        self.combined_template = self.jinja.get_template("combined_dashboard.html")
         self.logs_template = self.jinja.get_template("wifi_logs.html")
 
     async def index(self, _request: web.Request) -> web.Response:
         return web.Response(text=self.template.render(initial_state=jsonlib.dumps(self.state.snapshot())), content_type="text/html")
+
+    async def combined_index(self, _request: web.Request) -> web.Response:
+        return web.Response(text=self.combined_template.render(initial_state=jsonlib.dumps(self.state.snapshot())), content_type="text/html")
 
     def _wifi_logs_dir(self) -> Path:
         configured = Path(self.state.appcfg.detailed_wifi_log_file).expanduser() if self.state.appcfg.detailed_wifi_log_file else Path("wifilogs")
@@ -1395,6 +1399,7 @@ class WebServer:
         app.add_routes(
             [
                 web.get("/", self.index),
+                web.get("/combined", self.combined_index),
                 web.get("/ws", self.websocket_handler),
                 web.get("/wifilogs", self.wifi_logs_index),
                 web.get("/wifilogs/view/{name}", self.wifi_logs_view),
