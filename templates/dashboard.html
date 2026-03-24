@@ -8,7 +8,23 @@
     header { background: #12313b; padding: 10px 16px 8px 16px; font-size: 20px; position: sticky; top: 0; z-index: 1000; border-bottom: 1px solid #1c3a43; }
     .topbar-title { display: flex; align-items: center; gap: 10px; }
     .topbar-status { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 8px; font-size: 13px; align-items: center; }
+    .topbar-log-controls { margin-top: 8px; display: flex; align-items: center; gap: 10px; }
     .pill { background: #0d1c22; border: 1px solid #1c3a43; border-radius: 999px; padding: 4px 8px; white-space: nowrap; }
+    .log-status-on { color: #4caf50; font-weight: 700; }
+    .log-status-off { color: #f44336; font-weight: 700; }
+    .log-btn {
+      height: 34px;
+      border-radius: 8px;
+      border: 1px solid #2a5663;
+      background: linear-gradient(180deg, #1a4b59 0%, #123944 100%);
+      color: #e8f1f2;
+      font-weight: 700;
+      padding: 0 14px;
+      cursor: pointer;
+      box-shadow: 0 1px 0 rgba(0, 0, 0, 0.35);
+    }
+    .log-btn:hover { filter: brightness(1.1); }
+    .log-btn:active { transform: translateY(1px); }
     main { padding: 12px 16px 16px 16px; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
     .card { background: #11232b; border: 1px solid #1c3a43; border-radius: 6px; padding: 12px; }
@@ -39,6 +55,10 @@
   <header>
     <div class="topbar-title">Vehicle Monitor — <span id="vehicleName"></span> <small id="age"></small> <a href="/wifilogs" style="color:#9ad1d4; margin-left: 12px;">WiFi logs</a></div>
     <div class="topbar-status" id="topbarStatus"></div>
+    <div class="topbar-log-controls">
+      <span id="logStatusBadge">Log: OFF</span>
+      <button id="toggleWifiLog" class="log-btn">Start log</button>
+    </div>
   </header>
   <main>
     <section id="latency"></section>
@@ -57,7 +77,10 @@
     const gnssEl = document.getElementById('gnss');
     const wifiEl = document.getElementById('wifi');
     const topbarStatusEl = document.getElementById('topbarStatus');
+    const logStatusBadgeEl = document.getElementById('logStatusBadge');
+    const toggleWifiLogBtn = document.getElementById('toggleWifiLog');
     let wsConn = null;
+    let currentLogEnabled = false;
 
     function latencyMsInt(v) {
       if (typeof v !== 'number' || Number.isNaN(v)) return '--';
@@ -87,21 +110,16 @@
       const level = wifi.signal || (typeof wifi.signal_dbm === 'number' ? `${Math.round(wifi.signal_dbm)} dBm` : '--');
       pills.push(`<span class="pill">WiFi: ${wifi.ssid || '--'} ${level}</span>`);
 
-      const logCfg = state.detailed_wifi_logging || {};
-      const logEnabled = !!logCfg.enabled;
-      const btnText = logEnabled ? 'Stop log' : 'Start log';
-      const status = `${logEnabled ? 'ON' : 'OFF'}${logCfg.file ? ` (${logCfg.file})` : ''}${logCfg.last_error ? ` - ${logCfg.last_error}` : ''}`;
-      pills.push(`<span class="pill">Log: ${status}</span>`);
-      pills.push('<button id="toggleWifiLog" style="height:28px; border-radius:999px; border:1px solid #1c3a43; background:#0d1c22; color:#e8f1f2; padding:0 10px; cursor:pointer;">' + btnText + '</button>');
-
       topbarStatusEl.innerHTML = pills.join('');
-      const btn = document.getElementById('toggleWifiLog');
-      if (btn) {
-        btn.onclick = () => {
-          if (!wsConn || wsConn.readyState !== WebSocket.OPEN) return;
-          wsConn.send(JSON.stringify({ type: 'set_detailed_wifi_logging', enabled: !logEnabled }));
-        };
+
+      const logCfg = state.detailed_wifi_logging || {};
+      currentLogEnabled = !!logCfg.enabled;
+      logStatusBadgeEl.className = currentLogEnabled ? 'log-status-on' : 'log-status-off';
+      logStatusBadgeEl.textContent = `Log: ${currentLogEnabled ? 'ON' : 'OFF'}`;
+      if (logCfg.last_error) {
+        logStatusBadgeEl.textContent += ` (${logCfg.last_error})`;
       }
+      toggleWifiLogBtn.textContent = currentLogEnabled ? 'Stop log' : 'Start log';
     }
 
     function renderControllers(ctrls) {
@@ -315,6 +333,11 @@
       };
       ws.onclose = () => setTimeout(connect, 2000);
     }
+
+    toggleWifiLogBtn.onclick = () => {
+      if (!wsConn || wsConn.readyState !== WebSocket.OPEN) return;
+      wsConn.send(JSON.stringify({ type: 'set_detailed_wifi_logging', enabled: !currentLogEnabled }));
+    };
 
     render(state);
     connect();
