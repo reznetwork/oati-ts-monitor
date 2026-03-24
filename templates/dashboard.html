@@ -35,6 +35,7 @@
 <body>
   <header>Vehicle Monitor — <span id="vehicleName"></span> <small id="age"></small></header>
   <main>
+    <section id="controls"></section>
     <section id="latency"></section>
     <section class="grid" id="history"></section>
     <section class="grid" id="controllers"></section>
@@ -50,6 +51,22 @@
     const historyEl = document.getElementById('history');
     const gnssEl = document.getElementById('gnss');
     const wifiEl = document.getElementById('wifi');
+    const controlsEl = document.getElementById('controls');
+    let wsConn = null;
+
+    function renderControls(snap) {
+      const cfg = snap?.detailed_wifi_logging || {};
+      const enabled = !!cfg.enabled;
+      const btnText = enabled ? 'Disable detailed Wi-Fi log' : 'Enable detailed Wi-Fi log';
+      controlsEl.innerHTML = `<h3>Logging Control</h3><div><button id="toggleWifiLog">${btnText}</button> <span>${enabled ? 'ON' : 'OFF'} ${cfg.file ? `(${cfg.file})` : ''} ${cfg.last_error ? ` - ${cfg.last_error}` : ''}</span></div>`;
+      const btn = document.getElementById('toggleWifiLog');
+      if (btn) {
+        btn.onclick = () => {
+          if (!wsConn || wsConn.readyState !== WebSocket.OPEN) return;
+          wsConn.send(JSON.stringify({ type: 'set_detailed_wifi_logging', enabled: !enabled }));
+        };
+      }
+    }
 
     function renderLatency(data) {
       if (!data || Object.keys(data).length === 0) { latencyEl.innerHTML = ''; return; }
@@ -122,14 +139,15 @@
     function renderGnss(data) {
       if (!data) { gnssEl.innerHTML = ''; return; }
       const age = ((Date.now()/1000) - (data.ts || 0)).toFixed(1);
-      gnssEl.innerHTML = `<h3>GNSS</h3><div>Fix: ${data.fix || 'NO FIX'}, Sats: ${data.sats ?? '--'}, HDOP: ${data.hdop ?? '--'}, Age: ${age}s</div><div>Pos: ${data.lat ?? '--'}, ${data.lon ?? '--'}</div>`;
+      gnssEl.innerHTML = `<h3>GNSS</h3><div>Fix: ${data.fix || 'NO FIX'}, Solution: ${data.solution_level || '--'}, Sats: ${data.sats ?? '--'}, HDOP: ${data.hdop ?? '--'}, Age: ${age}s</div><div>Pos: ${data.lat ?? '--'}, ${data.lon ?? '--'}</div>`;
     }
 
     function renderWifi(data) {
       if (!data) { wifiEl.innerHTML = ''; return; }
       let html = '<h3>WiFi</h3>';
       if (data.status === 'connected') {
-        html += `Connected to ${data.ssid || '(ssid ?)'} (${data.bssid || '--'}) ${data.signal || ''} ${data.freq || ''}`;
+        const switchMs = typeof data.bssid_change_ms === 'number' ? `, switch ${data.bssid_change_ms} ms` : '';
+        html += `Connected to ${data.ssid || '(ssid ?)'} (${data.bssid || '--'}) ${data.signal || ''} ${data.freq || ''}${switchMs}`;
       } else {
         html += data.status;
         if (data.error) html += ' - ' + data.error;
@@ -236,6 +254,7 @@
       const ageSecs = state.last_update ? (Date.now()/1000 - state.last_update).toFixed(1) : 'n/a';
       ageEl.textContent = `(age ${ageSecs}s)`;
       renderControllers(state.controllers || {});
+      renderControls(state);
       renderLatency(state.display_latency || {});
       renderHistory(state.history);
       renderGnss(state.gnss);
@@ -245,6 +264,7 @@
     function connect() {
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
       const ws = new WebSocket(`${proto}://${location.host}/ws`);
+      wsConn = ws;
       ws.onmessage = (ev) => {
         try { const msg = JSON.parse(ev.data); if (msg.type === 'state') render(msg.data); } catch (e) { console.error(e); }
       };

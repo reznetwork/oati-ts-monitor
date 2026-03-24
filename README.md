@@ -131,6 +131,7 @@ The daemon/client use a single JSON config file (default: `monitor_config.json`)
 - `wifi` (optional)
   - `interface` (string): interface name for `iw dev <interface> link`
   - `refreshSeconds` (number): Wi-Fi refresh interval
+  - `detailedLogFile` (string): JSONL file for runtime-toggleable detailed Wi-Fi/roaming logging
 - `display`
   - `latencyHosts` (array): extra TCP latency probes displayed in the TUI and dashboard
     - each entry: `{ "name": "<label>", "host": "<ip>", "port": <int> }`
@@ -177,8 +178,16 @@ The daemon maintains a live `state` snapshot and rolling history (charts) for:
 
 4. **Wi‑Fi link stats (optional)**
    - If `wifi.interface` is set, the daemon runs `iw dev <interface> link` periodically.
-   - It parses signal level and bitrate to produce fields like `signal_dbm`, `tx_rate_mbps`, `rx_rate_mbps`.
+   - It parses signal level and bitrate to produce fields like `signal_dbm`, `rssi_dbm`, `tx_rate_mbps`, `rx_rate_mbps`, channel, and optional counters from `iw`.
    - These values are also tracked in the rolling history for charting.
+   - When BSSID changes, the daemon computes `bssid_change_ms` in the live state snapshot.
+
+5. **Detailed Wi‑Fi/roaming logging mode**
+   - The web dashboard can toggle this mode at runtime.
+   - While enabled, daemon writes JSONL records into `wifi.detailedLogFile`.
+   - Record types:
+     - `wifi_sample`: link rates/signal/noise/BSSID/channel/counters, GNSS snapshot, `ts_ms`
+     - `roaming_event`: roaming event (`search`, `selection`, `attachment`, `cold_reconnection`), raw details, GNSS snapshot, `ts_ms`
 
 5. **CPU load**
    - The daemon samples `os.getloadavg()` (Linux/Unix-style load average) and tracks the 1-minute load value in history.

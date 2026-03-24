@@ -5,6 +5,7 @@ import json
 import json as jsonlib
 import logging
 import os
+import queue
 import re
 import socket
 import subprocess
@@ -73,6 +74,7 @@ class AppCfg:
     gnss_port: Optional[int] = None
     wifi_iface: Optional[str] = None
     wifi_refresh: Optional[float] = None
+    detailed_wifi_log_file: Optional[str] = None
     display_latency_hosts: List[Tuple[str, str, int]] = field(default_factory=list)
     vehicles: List[VehicleCfg] = field(default_factory=list)
 
@@ -104,6 +106,7 @@ class AppState:
         self.wifi: Optional[Dict[str, Any]] = None
         self.cpu_load: Optional[float] = None
         self.display_latency: Dict[str, Dict[str, Any]] = {}
+        self.detailed_wifi_logging: Dict[str, Any] = {"enabled": False, "file": None, "last_error": None}
         self.last_update: float = 0.0
         self.history: Dict[str, Any] = {
             "modbus_latency": {},
@@ -145,6 +148,7 @@ class AppState:
                 "wifi": jsonlib.loads(jsonlib.dumps(self.wifi)) if self.wifi is not None else None,
                 "cpu_load": self.cpu_load,
                 "display_latency": jsonlib.loads(jsonlib.dumps(self.display_latency)),
+                "detailed_wifi_logging": jsonlib.loads(jsonlib.dumps(self.detailed_wifi_logging)),
                 "history": self._history_snapshot(),
                 "last_update": self.last_update,
                 "vehicle": self.vehicle.name,
@@ -196,6 +200,16 @@ class AppState:
             self.last_update = time.time()
             self.update_event.set()
             self.log_event.set()
+
+    def set_detailed_wifi_logging(self, *, enabled: bool, file: Optional[str], last_error: Optional[str]):
+        with self.lock:
+            self.detailed_wifi_logging = {"enabled": bool(enabled), "file": file, "last_error": last_error}
+            self.last_update = time.time()
+            self.update_event.set()
+
+    def gnss_snapshot(self) -> Optional[Dict[str, Any]]:
+        with self.lock:
+            return jsonlib.loads(jsonlib.dumps(self.gnss)) if self.gnss is not None else None
 
 
 class DataLogger:
@@ -262,6 +276,147 @@ class DataLogger:
                     fh.flush()
 
 
+class DetailedWifiLogger:
+    def __init__(self, state: AppState, log_file: Optional[str]):
+        self.state = state
+        self.log_file = Path(log_file).expanduser() if log_file else None
+        self.enabled = False
+        self.last_error: Optional[str] = None
+        self.stop_event = threading.Event()
+        self.queue: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=4096)
+        self.thread: Optional[threading.Thread] = None
+
+    def start(self):
+        if not self.log_file:
+            self.state.set_detailed_wifi_logging(enabled=False, file=None, last_error="log file is not configured")
+            return
+        self.log_file.parent.mkdir(parents=True, exist_ok=True)
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread.start()
+        self.state.set_detailed_wifi_logging(enabled=False, file=str(self.log_file), last_error=None)
+
+    def stop(self):
+        self.stop_event.set()
+        if self.thread:
+            self.thread.join(timeout=2)
+
+    def set_enabled(self, enabled: bool):
+        self.enabled = bool(enabled)
+        self.state.set_detailed_wifi_logging(enabled=self.enabled, file=str(self.log_file) if self.log_file else None, last_error=self.last_error)
+
+    def enqueue_wifi_sample(self, wifi: Optional[Dict[str, Any]], gnss: Optional[Dict[str, Any]], ts_ms: int):
+        if not self.enabled or not self.log_file or not wifi:
+            return
+        self._put(
+            {
+                "type": "wifi_sample",
+                "ts_ms": ts_ms,
+                "wifi": {
+                    "tx_rate_mbps": wifi.get("tx_rate_mbps"),
+                    "rx_rate_mbps": wifi.get("rx_rate_mbps"),
+                    "rssi_dbm": wifi.get("rssi_dbm"),
+                    "signal": wifi.get("signal"),
+                    "noise_dbm": wifi.get("noise_dbm"),
+                    "bssid": wifi.get("bssid"),
+                    "channel": wifi.get("channel"),
+                    "beacon_loss_count": wifi.get("beacon_loss_count"),
+                    "max_probe_tries": wifi.get("max_probe_tries"),
+                    "bssid_change_ms": wifi.get("bssid_change_ms"),
+                },
+                "gnss": gnss,
+            }
+        )
+
+    def enqueue_roaming_event(self, event_type: str, details: Dict[str, Any], gnss: Optional[Dict[str, Any]], ts_ms: int):
+        if not self.enabled or not self.log_file:
+            return
+        self._put({"type": "roaming_event", "event": event_type, "ts_ms": ts_ms, "details": details, "gnss": gnss})
+
+    def _put(self, payload: Dict[str, Any]) -> None:
+        try:
+            self.queue.put_nowait(payload)
+        except queue.Full:
+            self.last_error = "detailed wifi log queue overflow"
+            self.state.set_detailed_wifi_logging(enabled=self.enabled, file=str(self.log_file) if self.log_file else None, last_error=self.last_error)
+
+    def _loop(self):
+        if not self.log_file:
+            return
+        with self.log_file.open("a", encoding="utf-8") as fh:
+            while not self.stop_event.is_set():
+                try:
+                    item = self.queue.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                try:
+                    fh.write(jsonlib.dumps(item, ensure_ascii=False) + "\n")
+                    fh.flush()
+                except Exception as e:
+                    self.last_error = f"write failed: {e}"
+                    self.state.set_detailed_wifi_logging(enabled=self.enabled, file=str(self.log_file), last_error=self.last_error)
+
+
+class RoamingEventWatcher:
+    def __init__(self, interface: str, on_event):
+        self.interface = interface
+        self.on_event = on_event
+        self.stop_event = threading.Event()
+        self.thread: Optional[threading.Thread] = None
+
+    def start(self):
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        self.stop_event.set()
+        if self.thread:
+            self.thread.join(timeout=2)
+
+    def _detect_event(self, line: str) -> Optional[str]:
+        l = line.lower()
+        if self.interface and self.interface not in l and "wlan" in l:
+            return None
+        if "search" in l or "scan started" in l:
+            return "search"
+        if "selection" in l or "selected bss" in l:
+            return "selection"
+        if "attach" in l or "connected to" in l or "associated" in l:
+            return "attachment"
+        if "cold reconnection" in l or ("disconnect" in l and "reconnect" in l):
+            return "cold_reconnection"
+        return None
+
+    def _loop(self):
+        while not self.stop_event.is_set():
+            proc: Optional[subprocess.Popen[str]] = None
+            try:
+                proc = subprocess.Popen(
+                    ["iw", "event", "-t"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    bufsize=1,
+                )
+                assert proc.stdout is not None
+                while not self.stop_event.is_set():
+                    line = proc.stdout.readline()
+                    if not line:
+                        break
+                    event_type = self._detect_event(line.strip())
+                    if event_type:
+                        self.on_event(event_type, {"line": line.strip()}, int(time.time() * 1000))
+            except Exception:
+                pass
+            finally:
+                if proc is not None:
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+            if self.stop_event.wait(1.0):
+                break
+
+
 def _as_int_keys(d: Dict[str, Any]) -> Dict[int, str]:
     out: Dict[int, str] = {}
     for k, v in d.items():
@@ -326,6 +481,7 @@ def load_config(path: str) -> AppCfg:
         gnss_port=int(gnss_port) if gnss_port is not None else None,
         wifi_iface=str(wifi_cfg.get("interface")).strip() if wifi_cfg.get("interface") else None,
         wifi_refresh=wifi_refresh,
+        detailed_wifi_log_file=str(wifi_cfg.get("detailedLogFile")).strip() if wifi_cfg.get("detailedLogFile") else None,
         display_latency_hosts=latency_hosts,
         vehicles=vehicles,
     )
@@ -335,7 +491,7 @@ def write_default_config(path: str) -> None:
     default = {
         "pymodbus": {"port": DEFAULT_MODBUS_PORT, "timeout": DEFAULT_TIMEOUT, "unitCandidates": DEFAULT_UNIT_CANDIDATES, "coilsFallback": DEFAULT_COILS_FALLBACK},
         "gnss": {"host": "192.168.1.50", "port": 2947},
-        "wifi": {"interface": "wlp2s0", "refreshSeconds": 2},
+        "wifi": {"interface": "wlp2s0", "refreshSeconds": 2, "detailedLogFile": "wifi_roaming_detailed.jsonl"},
         "display": {"latencyHosts": [{"name": "gateway", "host": "192.168.1.1"}]},
         "vehicles": [
             {
@@ -441,6 +597,9 @@ def get_wifi_status(interface: str) -> Dict[str, Optional[Any]]:
     ssid = bssid = signal = None
     freq = None
     signal_dbm = tx_rate_mbps = rx_rate_mbps = None
+    noise_dbm: Optional[float] = None
+    beacon_loss_count: Optional[int] = None
+    max_probe_tries: Optional[int] = None
     for line in stdout.splitlines():
         line = line.strip()
         if line.startswith("Connected to"):
@@ -462,6 +621,12 @@ def get_wifi_status(interface: str) -> Dict[str, Optional[Any]]:
                     signal_dbm = float(match.group(1).split()[0])
                 except Exception:
                     signal_dbm = None
+            noise_match = re.search(r"noise:\s*(-?\d+)\s*dBm", line)
+            if noise_match:
+                try:
+                    noise_dbm = float(noise_match.group(1))
+                except Exception:
+                    noise_dbm = None
         elif "bitrate:" in line:
             match = re.search(r"^(tx|rx)\s+bitrate:\s*([0-9.]+)\s*MBit/s", line)
             if match:
@@ -470,6 +635,16 @@ def get_wifi_status(interface: str) -> Dict[str, Optional[Any]]:
                     tx_rate_mbps = rate
                 else:
                     rx_rate_mbps = rate
+        elif "beacon loss count:" in line:
+            try:
+                beacon_loss_count = int(line.split(":", 1)[1].strip())
+            except Exception:
+                beacon_loss_count = None
+        elif "max probe tries:" in line:
+            try:
+                max_probe_tries = int(line.split(":", 1)[1].strip())
+            except Exception:
+                max_probe_tries = None
     chan = _freq_to_channel(freq)
     freq_txt = f"{freq} MHz" if freq is not None else None
     if chan is not None:
@@ -480,9 +655,14 @@ def get_wifi_status(interface: str) -> Dict[str, Optional[Any]]:
         "bssid": bssid,
         "signal": signal,
         "signal_dbm": signal_dbm,
+        "rssi_dbm": signal_dbm,
+        "noise_dbm": noise_dbm,
         "freq": freq_txt,
+        "channel": chan,
         "tx_rate_mbps": tx_rate_mbps,
         "rx_rate_mbps": rx_rate_mbps,
+        "beacon_loss_count": beacon_loss_count,
+        "max_probe_tries": max_probe_tries,
     }
 
 
@@ -492,6 +672,19 @@ def get_cpu_load() -> Optional[float]:
         return float(load1)
     except Exception:
         return None
+
+
+def apply_bssid_transition_timing(
+    wifi: Dict[str, Any], last_bssid: Optional[str], last_bssid_seen_ms: Optional[int], ts_ms: int
+) -> Tuple[Optional[str], Optional[int]]:
+    bssid = wifi.get("bssid")
+    if bssid and bssid != last_bssid:
+        if last_bssid_seen_ms is not None:
+            wifi["bssid_change_ms"] = ts_ms - last_bssid_seen_ms
+        return str(bssid), ts_ms
+    if bssid and last_bssid_seen_ms is None:
+        return str(bssid), ts_ms
+    return last_bssid, last_bssid_seen_ms
 
 
 def call_bits(method, address: int, count: int, unit: int):
@@ -687,9 +880,11 @@ class GNSSClient:
             except Exception:
                 hdop = None
             fix_map = {0: "NO FIX", 1: "FIX", 2: "DGPS"}
+            solution_map = {0: "none", 1: "single", 2: "dgps"}
             with self.lock:
                 self.state = {
                     "fix": self.last_gsa_fix or fix_map.get(fix_quality, "FIX"),
+                    "solution_level": solution_map.get(fix_quality, "single"),
                     "sats": sats,
                     "hdop": hdop,
                     "lat": _nmea_to_deg(parts[2], parts[3]),
@@ -713,12 +908,26 @@ class Poller:
         self.last_net_check_time = 0.0
         self.last_wifi_check_time = 0.0
         self.gnss_client: Optional[GNSSClient] = None
+        self.detailed_wifi_logger = DetailedWifiLogger(self.state, self.appcfg.detailed_wifi_log_file)
+        self.roaming_watcher: Optional[RoamingEventWatcher] = None
+        self.last_bssid: Optional[str] = None
+        self.last_bssid_seen_ms: Optional[int] = None
         self.wifi_refresh_interval = self.appcfg.wifi_refresh if self.appcfg.wifi_refresh is not None else self.args.poll * 2
         self.poll_net_interval = self.args.poll_net
         self._build_clients()
         if self.appcfg.gnss_host and self.appcfg.gnss_port:
             self.gnss_client = GNSSClient(self.appcfg.gnss_host, int(self.appcfg.gnss_port))
             self.gnss_client.start()
+        if self.appcfg.wifi_iface:
+            self.roaming_watcher = RoamingEventWatcher(self.appcfg.wifi_iface, self._on_roaming_event)
+            self.roaming_watcher.start()
+        self.detailed_wifi_logger.start()
+
+    def _on_roaming_event(self, event_type: str, details: Dict[str, Any], ts_ms: int):
+        self.detailed_wifi_logger.enqueue_roaming_event(event_type, details, self.state.gnss_snapshot(), ts_ms)
+
+    def set_detailed_wifi_logging(self, enabled: bool) -> None:
+        self.detailed_wifi_logger.set_enabled(enabled)
 
     def _build_clients(self):
         self.clients = {}
@@ -786,7 +995,13 @@ class Poller:
         for cfg in self.vehicle.controllers:
             self.poll_controller(cfg)
         if now - self.last_wifi_check_time >= self.wifi_refresh_interval and self.appcfg.wifi_iface:
-            self.state.set_wifi(get_wifi_status(self.appcfg.wifi_iface))
+            wifi = get_wifi_status(self.appcfg.wifi_iface)
+            ts_ms = int(time.time() * 1000)
+            self.last_bssid, self.last_bssid_seen_ms = apply_bssid_transition_timing(
+                wifi, self.last_bssid, self.last_bssid_seen_ms, ts_ms
+            )
+            self.state.set_wifi(wifi)
+            self.detailed_wifi_logger.enqueue_wifi_sample(wifi, self.state.gnss_snapshot(), ts_ms)
             self.last_wifi_check_time = now
         if self.gnss_client:
             self.state.set_gnss(self.gnss_client.snapshot())
@@ -804,6 +1019,9 @@ class Poller:
 
     def stop(self):
         self.stop_event.set()
+        self.detailed_wifi_logger.stop()
+        if self.roaming_watcher:
+            self.roaming_watcher.stop()
         if self.gnss_client:
             self.gnss_client.stop()
         if getattr(self, "thread", None):
@@ -811,13 +1029,14 @@ class Poller:
 
 
 class WebServer:
-    def __init__(self, state: AppState, host: str, port: int, broadcast_interval: float = 1.0):
+    def __init__(self, state: AppState, host: str, port: int, broadcast_interval: float = 1.0, poller: Optional[Poller] = None):
         if jinja2 is None or web is None:
             raise RuntimeError("aiohttp and jinja2 are required for HTTP mode")
         self.state = state
         self.host = host
         self.port = port
         self.broadcast_interval = broadcast_interval
+        self.poller = poller
         self.thread: Optional[threading.Thread] = None
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.stop_event = threading.Event()
@@ -834,6 +1053,16 @@ class WebServer:
         try:
             await ws.send_json({"type": "state", "data": self.state.snapshot()})
             async for msg in ws:
+                if msg.type == WSMsgType.TEXT:
+                    try:
+                        body = jsonlib.loads(msg.data)
+                    except Exception:
+                        body = {}
+                    if body.get("type") == "set_detailed_wifi_logging":
+                        enabled = bool(body.get("enabled"))
+                        if self.poller:
+                            self.poller.set_detailed_wifi_logging(enabled)
+                        await ws.send_json({"type": "ack", "command": "set_detailed_wifi_logging", "ok": True, "enabled": enabled})
                 if msg.type == WSMsgType.ERROR:
                     break
         finally:

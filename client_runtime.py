@@ -220,7 +220,13 @@ class ClientTUI:
         if gnss:
             lat_txt = _format_coord(gnss.get("lat"), "N", "S") or "--"
             lon_txt = _format_coord(gnss.get("lon"), "E", "W") or "--"
-            addstr_clip(self.stdscr, row, 0, f"GNSS: {gnss.get('fix', '--')} {lat_txt}, {lon_txt}", curses.color_pair(Colors.CYAN))
+            sol = gnss.get("solution_level", "--")
+            addstr_clip(self.stdscr, row, 0, f"GNSS: {gnss.get('fix', '--')} [{sol}] {lat_txt}, {lon_txt}", curses.color_pair(Colors.CYAN))
+            row += 1
+
+        wifi = snap.get("wifi")
+        if wifi and isinstance(wifi.get("bssid_change_ms"), (int, float)):
+            addstr_clip(self.stdscr, row, 0, f"WiFi BSSID switch: {int(wifi.get('bssid_change_ms'))} ms", curses.color_pair(Colors.MAGENTA))
             row += 1
         self.stdscr.refresh()
 

@@ -206,7 +206,7 @@ def run_daemon(args: argparse.Namespace) -> int:
     poller.start()
     datalogger = DataLogger(state, vehicle, args.log_file, args.log_interval)
     datalogger.start()
-    web_server = WebServer(state, args.http_bind, args.http_port, broadcast_interval=args.poll) if args.http else None
+    web_server = WebServer(state, args.http_bind, args.http_port, broadcast_interval=args.poll, poller=poller) if args.http else None
     if web_server:
         web_server.start()
     ipc_server = SocketIpcServer(state, poller, args.ipc_bind, args.ipc_port)
