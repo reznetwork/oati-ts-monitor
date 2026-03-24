@@ -205,6 +205,20 @@
     function renderHistory(history) {
       historyEl.innerHTML = '';
       if (!history) return;
+      const seriesRate = (series) => {
+        if (!Array.isArray(series) || series.length < 2) return [];
+        const out = [];
+        for (let i = 1; i < series.length; i += 1) {
+          const prev = series[i - 1];
+          const cur = series[i];
+          if (typeof prev?.value !== 'number' || typeof cur?.value !== 'number') continue;
+          if (typeof prev?.ts !== 'number' || typeof cur?.ts !== 'number') continue;
+          const dt = cur.ts - prev.ts;
+          if (dt <= 0) continue;
+          out.push({ ts: cur.ts, value: (cur.value - prev.value) / dt / 1024.0 });
+        }
+        return out;
+      };
       const makeCard = (title, series, unit, color) => {
         const card = document.createElement('div');
         card.className = 'card';
@@ -243,6 +257,14 @@
       }
       if (wifi.rx_rate_mbps?.length) {
         makeCard('WiFi RX rate', wifi.rx_rate_mbps, ' Mbps', '#cddc39');
+      }
+      if (wifi.tx_bytes?.length) {
+        makeCard('WiFi TX bytes', wifi.tx_bytes, ' B', '#26c6da');
+        makeCard('WiFi TX throughput', seriesRate(wifi.tx_bytes), ' KB/s', '#00acc1');
+      }
+      if (wifi.rx_bytes?.length) {
+        makeCard('WiFi RX bytes', wifi.rx_bytes, ' B', '#ab47bc');
+        makeCard('WiFi RX throughput', seriesRate(wifi.rx_bytes), ' KB/s', '#8e24aa');
       }
       if (history.cpu_load?.length) {
         makeCard('CPU load', history.cpu_load, '', '#e91e63');

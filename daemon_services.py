@@ -111,7 +111,13 @@ class AppState:
         self.history: Dict[str, Any] = {
             "modbus_latency": {},
             "gateway_latency": {},
-            "wifi": {"signal_dbm": deque(), "tx_rate_mbps": deque(), "rx_rate_mbps": deque()},
+            "wifi": {
+                "signal_dbm": deque(),
+                "tx_rate_mbps": deque(),
+                "rx_rate_mbps": deque(),
+                "tx_bytes": deque(),
+                "rx_bytes": deque(),
+            },
             "cpu_load": deque(),
         }
         for cfg in self.vehicle.controllers:
@@ -179,6 +185,8 @@ class AppState:
                 self._append_history(self.history["wifi"]["signal_dbm"], snap.get("signal_dbm"))
                 self._append_history(self.history["wifi"]["tx_rate_mbps"], snap.get("tx_rate_mbps"))
                 self._append_history(self.history["wifi"]["rx_rate_mbps"], snap.get("rx_rate_mbps"))
+                self._append_history(self.history["wifi"]["tx_bytes"], snap.get("tx_bytes"))
+                self._append_history(self.history["wifi"]["rx_bytes"], snap.get("rx_bytes"))
             self.last_update = time.time()
             self.update_event.set()
             self.log_event.set()
@@ -326,8 +334,11 @@ class DetailedWifiLogger:
                 "wifi": {
                     "tx_rate_mbps": wifi.get("tx_rate_mbps"),
                     "rx_rate_mbps": wifi.get("rx_rate_mbps"),
+                    "tx_bytes": wifi.get("tx_bytes"),
+                    "rx_bytes": wifi.get("rx_bytes"),
                     "rssi_dbm": wifi.get("rssi_dbm"),
                     "signal": wifi.get("signal"),
+                    "signal_avg_dbm": wifi.get("signal_avg_dbm"),
                     "noise_dbm": wifi.get("noise_dbm"),
                     "bssid": wifi.get("bssid"),
                     "channel": wifi.get("channel"),
@@ -687,6 +698,82 @@ def get_wifi_status(interface: str) -> Dict[str, Optional[Any]]:
     }
 
 
+def _run_iw_command(args: List[str], timeout: float = 4.0) -> str:
+    try:
+        res = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    except Exception:
+        return ""
+    if res.returncode != 0:
+        return ""
+    return (res.stdout or "").strip()
+
+
+def parse_station_dump(output: str) -> Dict[str, Optional[float]]:
+    out: Dict[str, Optional[float]] = {
+        "inactive_time_ms": None,
+        "connected_time_ms": None,
+        "tx_retries": None,
+        "tx_failed": None,
+        "signal_dbm": None,
+        "signal_avg_dbm": None,
+        "rx_bytes": None,
+        "tx_bytes": None,
+    }
+    for raw in output.splitlines():
+        line = raw.strip()
+        if line.startswith("inactive time:"):
+            m = re.search(r"(\d+)\s*ms", line)
+            out["inactive_time_ms"] = float(m.group(1)) if m else None
+        elif line.startswith("connected time:"):
+            m = re.search(r"(\d+)\s*seconds?", line)
+            out["connected_time_ms"] = float(m.group(1)) * 1000.0 if m else None
+        elif line.startswith("tx retries:"):
+            m = re.search(r"(\d+)", line)
+            out["tx_retries"] = float(m.group(1)) if m else None
+        elif line.startswith("tx failed:"):
+            m = re.search(r"(\d+)", line)
+            out["tx_failed"] = float(m.group(1)) if m else None
+        elif line.startswith("signal avg:"):
+            m = re.search(r"(-?\d+)\s*dBm", line)
+            out["signal_avg_dbm"] = float(m.group(1)) if m else None
+        elif line.startswith("signal:"):
+            m = re.search(r"(-?\d+)\s*dBm", line)
+            out["signal_dbm"] = float(m.group(1)) if m else None
+        elif line.startswith("rx bytes:"):
+            m = re.search(r"(\d+)", line)
+            out["rx_bytes"] = float(m.group(1)) if m else None
+        elif line.startswith("tx bytes:"):
+            m = re.search(r"(\d+)", line)
+            out["tx_bytes"] = float(m.group(1)) if m else None
+    return out
+
+
+def parse_iw_scan_candidates(output: str, current_ssid: Optional[str]) -> Dict[str, Optional[float]]:
+    best_rssi: Optional[float] = None
+    count = 0
+    cur_ssid: Optional[str] = None
+    cur_signal: Optional[float] = None
+    for raw in output.splitlines():
+        line = raw.strip()
+        if line.startswith("BSS "):
+            if current_ssid and cur_ssid == current_ssid and cur_signal is not None:
+                count += 1
+                if best_rssi is None or cur_signal > best_rssi:
+                    best_rssi = cur_signal
+            cur_ssid = None
+            cur_signal = None
+        elif line.startswith("SSID:"):
+            cur_ssid = line.split(":", 1)[1].strip() or None
+        elif line.startswith("signal:"):
+            m = re.search(r"(-?\d+(?:\.\d+)?)\s*dBm", line)
+            cur_signal = float(m.group(1)) if m else None
+    if current_ssid and cur_ssid == current_ssid and cur_signal is not None:
+        count += 1
+        if best_rssi is None or cur_signal > best_rssi:
+            best_rssi = cur_signal
+    return {"candidate_count": float(count) if count else None, "top_candidate_rssi": best_rssi}
+
+
 def get_cpu_load() -> Optional[float]:
     try:
         load1, _, _ = os.getloadavg()
@@ -933,6 +1020,12 @@ class Poller:
         self.roaming_watcher: Optional[RoamingEventWatcher] = None
         self.last_bssid: Optional[str] = None
         self.last_bssid_seen_ms: Optional[int] = None
+        self.last_channel: Optional[int] = None
+        self.last_station_stats: Optional[Dict[str, Optional[float]]] = None
+        self.last_scan_ts: float = 0.0
+        self.last_scan_candidates: Dict[str, Optional[float]] = {"candidate_count": None, "top_candidate_rssi": None}
+        self.signal_window: deque = deque(maxlen=24)
+        self.last_reason_code: Optional[int] = None
         self.wifi_refresh_interval = self.appcfg.wifi_refresh if self.appcfg.wifi_refresh is not None else self.args.poll * 2
         self.poll_net_interval = self.args.poll_net
         self._build_clients()
@@ -944,8 +1037,54 @@ class Poller:
             self.roaming_watcher.start()
         self.detailed_wifi_logger.start()
 
+    def _collect_station_stats(self) -> Dict[str, Optional[float]]:
+        if not self.appcfg.wifi_iface:
+            return {}
+        return parse_station_dump(_run_iw_command(["iw", "dev", self.appcfg.wifi_iface, "station", "dump"]))
+
+    def _collect_scan_candidates(self, ssid: Optional[str]) -> Dict[str, Optional[float]]:
+        if not self.appcfg.wifi_iface:
+            return {"candidate_count": None, "top_candidate_rssi": None}
+        return parse_iw_scan_candidates(_run_iw_command(["iw", "dev", self.appcfg.wifi_iface, "scan"], timeout=8.0), ssid)
+
+    def _extract_reason_code(self, line: str) -> Optional[int]:
+        m = re.search(r"reason(?:\s*code)?\s*[:=]\s*(\d+)", line.lower())
+        return int(m.group(1)) if m else None
+
     def _on_roaming_event(self, event_type: str, details: Dict[str, Any], ts_ms: int):
-        self.detailed_wifi_logger.enqueue_roaming_event(event_type, details, self.state.gnss_snapshot(), ts_ms)
+        line = str(details.get("line") or "")
+        reason_code = self._extract_reason_code(line)
+        if reason_code is not None:
+            self.last_reason_code = reason_code
+        station_now = self._collect_station_stats()
+        trend = list(self.signal_window)
+        event_details = {
+            "reason_code": reason_code if reason_code is not None else self.last_reason_code,
+            "old_bssid": self.last_bssid,
+            "new_bssid": None,
+            "old_channel": self.last_channel,
+            "new_channel": None,
+            "candidate_count": self.last_scan_candidates.get("candidate_count"),
+            "top_candidate_rssi": self.last_scan_candidates.get("top_candidate_rssi"),
+            "connected_time_before_roam_ms": (self.last_station_stats or {}).get("connected_time_ms") if self.last_station_stats else None,
+            "inactive_time_ms": station_now.get("inactive_time_ms"),
+            "tx_retries_delta": None,
+            "tx_failed_delta": None,
+            "signal_trend": trend,
+            "signal": station_now.get("signal_dbm"),
+            "signal_avg": station_now.get("signal_avg_dbm"),
+        }
+        if self.last_station_stats:
+            before_retry = self.last_station_stats.get("tx_retries")
+            now_retry = station_now.get("tx_retries")
+            before_fail = self.last_station_stats.get("tx_failed")
+            now_fail = station_now.get("tx_failed")
+            if isinstance(before_retry, (int, float)) and isinstance(now_retry, (int, float)):
+                event_details["tx_retries_delta"] = now_retry - before_retry
+            if isinstance(before_fail, (int, float)) and isinstance(now_fail, (int, float)):
+                event_details["tx_failed_delta"] = now_fail - before_fail
+        event_details.update(details)
+        self.detailed_wifi_logger.enqueue_roaming_event(event_type, event_details, self.state.gnss_snapshot(), ts_ms)
 
     def set_detailed_wifi_logging(self, enabled: bool) -> None:
         self.detailed_wifi_logger.set_enabled(enabled)
@@ -1018,9 +1157,62 @@ class Poller:
         if now - self.last_wifi_check_time >= self.wifi_refresh_interval and self.appcfg.wifi_iface:
             wifi = get_wifi_status(self.appcfg.wifi_iface)
             ts_ms = int(time.time() * 1000)
+            prev_bssid = self.last_bssid
+            prev_channel = self.last_channel
+            station_stats = self._collect_station_stats()
+            wifi.update(
+                {
+                    "inactive_time_ms": station_stats.get("inactive_time_ms"),
+                    "connected_time_ms": station_stats.get("connected_time_ms"),
+                    "tx_retries": station_stats.get("tx_retries"),
+                    "tx_failed": station_stats.get("tx_failed"),
+                    "signal_avg_dbm": station_stats.get("signal_avg_dbm"),
+                    "tx_bytes": station_stats.get("tx_bytes"),
+                    "rx_bytes": station_stats.get("rx_bytes"),
+                }
+            )
+            self.signal_window.append(
+                {
+                    "ts_ms": ts_ms,
+                    "signal": station_stats.get("signal_dbm", wifi.get("signal_dbm")),
+                    "signal_avg": station_stats.get("signal_avg_dbm"),
+                }
+            )
+            if time.monotonic() - self.last_scan_ts >= max(self.wifi_refresh_interval * 4.0, 10.0):
+                self.last_scan_candidates = self._collect_scan_candidates(wifi.get("ssid"))
+                self.last_scan_ts = time.monotonic()
             self.last_bssid, self.last_bssid_seen_ms = apply_bssid_transition_timing(
                 wifi, self.last_bssid, self.last_bssid_seen_ms, ts_ms
             )
+            if wifi.get("bssid") and prev_bssid and wifi.get("bssid") != prev_bssid:
+                details = {
+                    "reason_code": self.last_reason_code,
+                    "old_bssid": prev_bssid,
+                    "new_bssid": wifi.get("bssid"),
+                    "old_channel": prev_channel,
+                    "new_channel": wifi.get("channel"),
+                    "candidate_count": self.last_scan_candidates.get("candidate_count"),
+                    "top_candidate_rssi": self.last_scan_candidates.get("top_candidate_rssi"),
+                    "connected_time_before_roam_ms": (self.last_station_stats or {}).get("connected_time_ms") if self.last_station_stats else None,
+                    "inactive_time_ms": station_stats.get("inactive_time_ms"),
+                    "tx_retries_delta": None,
+                    "tx_failed_delta": None,
+                    "signal_trend": list(self.signal_window),
+                    "signal": station_stats.get("signal_dbm", wifi.get("signal_dbm")),
+                    "signal_avg": station_stats.get("signal_avg_dbm"),
+                }
+                if self.last_station_stats:
+                    prev_retry = self.last_station_stats.get("tx_retries")
+                    prev_fail = self.last_station_stats.get("tx_failed")
+                    now_retry = station_stats.get("tx_retries")
+                    now_fail = station_stats.get("tx_failed")
+                    if isinstance(prev_retry, (int, float)) and isinstance(now_retry, (int, float)):
+                        details["tx_retries_delta"] = now_retry - prev_retry
+                    if isinstance(prev_fail, (int, float)) and isinstance(now_fail, (int, float)):
+                        details["tx_failed_delta"] = now_fail - prev_fail
+                self.detailed_wifi_logger.enqueue_roaming_event("attachment", details, self.state.gnss_snapshot(), ts_ms)
+            self.last_channel = wifi.get("channel") if isinstance(wifi.get("channel"), int) else self.last_channel
+            self.last_station_stats = station_stats
             self.state.set_wifi(wifi)
             self.detailed_wifi_logger.enqueue_wifi_sample(wifi, self.state.gnss_snapshot(), ts_ms)
             self.last_wifi_check_time = now

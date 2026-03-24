@@ -179,6 +179,7 @@ The daemon maintains a live `state` snapshot and rolling history (charts) for:
 4. **Wi‑Fi link stats (optional)**
    - If `wifi.interface` is set, the daemon runs `iw dev <interface> link` periodically.
    - It parses signal level and bitrate to produce fields like `signal_dbm`, `rssi_dbm`, `tx_rate_mbps`, `rx_rate_mbps`, channel, and optional counters from `iw`.
+   - It also samples station counters (`tx_bytes`, `rx_bytes`, `tx_retries`, `tx_failed`, `connected_time_ms`, `inactive_time_ms`, `signal_avg_dbm`) when available.
    - These values are also tracked in the rolling history for charting.
    - When BSSID changes, the daemon computes `bssid_change_ms` in the live state snapshot.
 
@@ -188,6 +189,11 @@ The daemon maintains a live `state` snapshot and rolling history (charts) for:
    - Record types:
      - `wifi_sample`: link rates/signal/noise/BSSID/channel/counters, GNSS snapshot, `ts_ms`
      - `roaming_event`: roaming event (`search`, `selection`, `attachment`, `cold_reconnection`), raw details, GNSS snapshot, `ts_ms`
+   - `roaming_event` is enriched with best-effort fields: `reason_code`, old/new BSSID and channel, candidate metrics, connected/inactive timing, retry/fail deltas, and recent signal trend samples.
+
+6. **Dashboard data volume graphs**
+   - Web dashboard history now includes Wi‑Fi `tx_bytes` and `rx_bytes` trends.
+   - Additional derived throughput graphs (`KB/s`) are rendered from byte deltas.
 
 5. **CPU load**
    - The daemon samples `os.getloadavg()` (Linux/Unix-style load average) and tracks the 1-minute load value in history.

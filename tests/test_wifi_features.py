@@ -6,10 +6,61 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
-from daemon_services import AppCfg, AppState, DetailedWifiLogger, VehicleCfg, apply_bssid_transition_timing, get_wifi_status
+from daemon_services import (
+    AppCfg,
+    AppState,
+    DetailedWifiLogger,
+    VehicleCfg,
+    apply_bssid_transition_timing,
+    get_wifi_status,
+    parse_iw_scan_candidates,
+    parse_station_dump,
+)
 
 
 class TestWifiFeatures(unittest.TestCase):
+    def test_parse_station_dump(self):
+        output = "\n".join(
+            [
+                "Station aa:bb:cc:dd:ee:ff (on wlan0)",
+                "inactive time: 50 ms",
+                "connected time: 14 seconds",
+                "rx bytes: 1234",
+                "tx bytes: 4321",
+                "tx retries: 9",
+                "tx failed: 2",
+                "signal: -60 dBm",
+                "signal avg: -62 dBm",
+            ]
+        )
+        stats = parse_station_dump(output)
+        self.assertEqual(stats["inactive_time_ms"], 50.0)
+        self.assertEqual(stats["connected_time_ms"], 14000.0)
+        self.assertEqual(stats["rx_bytes"], 1234.0)
+        self.assertEqual(stats["tx_bytes"], 4321.0)
+        self.assertEqual(stats["tx_retries"], 9.0)
+        self.assertEqual(stats["tx_failed"], 2.0)
+        self.assertEqual(stats["signal_dbm"], -60.0)
+        self.assertEqual(stats["signal_avg_dbm"], -62.0)
+
+    def test_parse_iw_scan_candidates(self):
+        output = "\n".join(
+            [
+                "BSS aa:bb:cc:00:00:01(on wlan0)",
+                "SSID: mynet",
+                "signal: -70.00 dBm",
+                "BSS aa:bb:cc:00:00:02(on wlan0)",
+                "SSID: mynet",
+                "signal: -55.00 dBm",
+                "BSS aa:bb:cc:00:00:03(on wlan0)",
+                "SSID: other",
+                "signal: -50.00 dBm",
+            ]
+        )
+        c = parse_iw_scan_candidates(output, "mynet")
+        self.assertEqual(c["candidate_count"], 2.0)
+        self.assertEqual(c["top_candidate_rssi"], -55.0)
+
     @patch("daemon_services.subprocess.run")
     def test_get_wifi_status_parses_extended_fields(self, mock_run):
         mock_run.return_value.returncode = 0
@@ -71,6 +122,13 @@ class TestWifiFeatures(unittest.TestCase):
                 self.assertEqual(parsed["event"], "search")
             finally:
                 os.chdir(cwd)
+
+    def test_wifi_history_tracks_bytes(self):
+        st = AppState(vehicle=VehicleCfg(name="v", controllers=[]), appcfg=AppCfg())
+        st.set_wifi({"signal_dbm": -60.0, "tx_rate_mbps": 1.0, "rx_rate_mbps": 2.0, "tx_bytes": 1000.0, "rx_bytes": 2000.0})
+        snap = st.snapshot()
+        self.assertTrue(len(snap["history"]["wifi"]["tx_bytes"]) >= 1)
+        self.assertTrue(len(snap["history"]["wifi"]["rx_bytes"]) >= 1)
 
 
 if __name__ == "__main__":
