@@ -308,7 +308,10 @@
         makeCard('WiFi RX throughput', seriesRate(wifi.rx_bytes), ' KB/s', '#8e24aa');
       }
       if (history.cpu_load?.length) {
-        makeCard('CPU load', history.cpu_load, '', '#e91e63');
+        makeCard('CPU load', history.cpu_load, ' %', '#e91e63');
+      }
+      if (history.cpu_temp_c?.length) {
+        makeCard('SoC temp (soc_thermal-virtual-0)', history.cpu_temp_c, ' °C', '#ff7043');
       }
     }
 

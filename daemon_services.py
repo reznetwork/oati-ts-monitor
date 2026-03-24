@@ -119,6 +119,7 @@ class AppState:
                 "rx_bytes": deque(),
             },
             "cpu_load": deque(),
+            "cpu_temp_c": deque(),
         }
         for cfg in self.vehicle.controllers:
             point_meta = {}
@@ -144,6 +145,7 @@ class AppState:
             "gateway_latency": {n: list(s) for n, s in self.history["gateway_latency"].items()},
             "wifi": {k: list(v) for k, v in self.history["wifi"].items()},
             "cpu_load": list(self.history["cpu_load"]),
+            "cpu_temp_c": list(self.history["cpu_temp_c"]),
         }
 
     def snapshot(self) -> Dict[str, Any]:
@@ -205,6 +207,13 @@ class AppState:
         with self.lock:
             self.cpu_load = load
             self._append_history(self.history["cpu_load"], load)
+            self.last_update = time.time()
+            self.update_event.set()
+            self.log_event.set()
+
+    def set_cpu_temp(self, temp_c: Optional[float]):
+        with self.lock:
+            self._append_history(self.history["cpu_temp_c"], temp_c)
             self.last_update = time.time()
             self.update_event.set()
             self.log_event.set()
@@ -777,9 +786,33 @@ def parse_iw_scan_candidates(output: str, current_ssid: Optional[str]) -> Dict[s
 def get_cpu_load() -> Optional[float]:
     try:
         load1, _, _ = os.getloadavg()
-        return float(load1)
+        cores = os.cpu_count() or 1
+        return max(0.0, float(load1) / float(cores) * 100.0)
     except Exception:
         return None
+
+
+def get_soc_temp_c(sensor_name: str = "soc_thermal-virtual-0") -> Optional[float]:
+    base = Path("/sys/class/thermal")
+    if not base.exists():
+        return None
+    try:
+        for zone in sorted(base.glob("thermal_zone*")):
+            type_file = zone / "type"
+            temp_file = zone / "temp"
+            if not type_file.exists() or not temp_file.exists():
+                continue
+            sensor = type_file.read_text(encoding="utf-8", errors="ignore").strip()
+            if sensor != sensor_name:
+                continue
+            raw = temp_file.read_text(encoding="utf-8", errors="ignore").strip()
+            val = float(raw)
+            if abs(val) > 300:
+                val = val / 1000.0
+            return val
+    except Exception:
+        return None
+    return None
 
 
 def apply_bssid_transition_timing(
@@ -1219,6 +1252,7 @@ class Poller:
         if self.gnss_client:
             self.state.set_gnss(self.gnss_client.snapshot())
         self.state.set_cpu_load(get_cpu_load())
+        self.state.set_cpu_temp(get_soc_temp_c())
 
     def start(self):
         self.thread = threading.Thread(target=self._loop, daemon=True)
