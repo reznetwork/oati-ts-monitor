@@ -279,21 +279,21 @@ class DataLogger:
 class DetailedWifiLogger:
     def __init__(self, state: AppState, log_file: Optional[str]):
         self.state = state
-        self.log_file = Path(log_file).expanduser() if log_file else None
+        configured = Path(log_file).expanduser() if log_file else Path("wifilogs")
+        self.log_dir = (configured.parent / "wifilogs") if configured.suffix else configured
         self.enabled = False
         self.last_error: Optional[str] = None
         self.stop_event = threading.Event()
         self.queue: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=4096)
         self.thread: Optional[threading.Thread] = None
+        self.lock = threading.Lock()
+        self.current_session_file: Optional[Path] = None
 
     def start(self):
-        if not self.log_file:
-            self.state.set_detailed_wifi_logging(enabled=False, file=None, last_error="log file is not configured")
-            return
-        self.log_file.parent.mkdir(parents=True, exist_ok=True)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
-        self.state.set_detailed_wifi_logging(enabled=False, file=str(self.log_file), last_error=None)
+        self.state.set_detailed_wifi_logging(enabled=False, file=None, last_error=None)
 
     def stop(self):
         self.stop_event.set()
@@ -301,16 +301,28 @@ class DetailedWifiLogger:
             self.thread.join(timeout=2)
 
     def set_enabled(self, enabled: bool):
-        self.enabled = bool(enabled)
-        self.state.set_detailed_wifi_logging(enabled=self.enabled, file=str(self.log_file) if self.log_file else None, last_error=self.last_error)
+        enabled = bool(enabled)
+        with self.lock:
+            if enabled and not self.enabled:
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+                self.current_session_file = self.log_dir / f"wifi_capture_{stamp}.jsonl"
+            if not enabled:
+                self.current_session_file = None
+            self.enabled = enabled
+            current_file = str(self.current_session_file) if self.current_session_file else None
+        self.state.set_detailed_wifi_logging(enabled=self.enabled, file=current_file, last_error=self.last_error)
 
     def enqueue_wifi_sample(self, wifi: Optional[Dict[str, Any]], gnss: Optional[Dict[str, Any]], ts_ms: int):
-        if not self.enabled or not self.log_file or not wifi:
+        with self.lock:
+            enabled = self.enabled
+            session_file = str(self.current_session_file) if self.current_session_file else None
+        if not enabled or not session_file or not wifi:
             return
         self._put(
             {
                 "type": "wifi_sample",
                 "ts_ms": ts_ms,
+                "_session_file": session_file,
                 "wifi": {
                     "tx_rate_mbps": wifi.get("tx_rate_mbps"),
                     "rx_rate_mbps": wifi.get("rx_rate_mbps"),
@@ -328,32 +340,41 @@ class DetailedWifiLogger:
         )
 
     def enqueue_roaming_event(self, event_type: str, details: Dict[str, Any], gnss: Optional[Dict[str, Any]], ts_ms: int):
-        if not self.enabled or not self.log_file:
+        with self.lock:
+            enabled = self.enabled
+            session_file = str(self.current_session_file) if self.current_session_file else None
+        if not enabled or not session_file:
             return
-        self._put({"type": "roaming_event", "event": event_type, "ts_ms": ts_ms, "details": details, "gnss": gnss})
+        self._put({"type": "roaming_event", "event": event_type, "ts_ms": ts_ms, "_session_file": session_file, "details": details, "gnss": gnss})
 
     def _put(self, payload: Dict[str, Any]) -> None:
         try:
             self.queue.put_nowait(payload)
         except queue.Full:
             self.last_error = "detailed wifi log queue overflow"
-            self.state.set_detailed_wifi_logging(enabled=self.enabled, file=str(self.log_file) if self.log_file else None, last_error=self.last_error)
+            with self.lock:
+                current_file = str(self.current_session_file) if self.current_session_file else None
+                enabled = self.enabled
+            self.state.set_detailed_wifi_logging(enabled=enabled, file=current_file, last_error=self.last_error)
 
     def _loop(self):
-        if not self.log_file:
-            return
-        with self.log_file.open("a", encoding="utf-8") as fh:
-            while not self.stop_event.is_set():
-                try:
-                    item = self.queue.get(timeout=0.5)
-                except queue.Empty:
-                    continue
-                try:
+        while not self.stop_event.is_set():
+            try:
+                item = self.queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            session_file = item.pop("_session_file", None)
+            if not session_file:
+                continue
+            try:
+                with Path(session_file).open("a", encoding="utf-8") as fh:
                     fh.write(jsonlib.dumps(item, ensure_ascii=False) + "\n")
-                    fh.flush()
-                except Exception as e:
-                    self.last_error = f"write failed: {e}"
-                    self.state.set_detailed_wifi_logging(enabled=self.enabled, file=str(self.log_file), last_error=self.last_error)
+            except Exception as e:
+                self.last_error = f"write failed: {e}"
+                with self.lock:
+                    current_file = str(self.current_session_file) if self.current_session_file else None
+                    enabled = self.enabled
+                self.state.set_detailed_wifi_logging(enabled=enabled, file=current_file, last_error=self.last_error)
 
 
 class RoamingEventWatcher:
@@ -491,7 +512,7 @@ def write_default_config(path: str) -> None:
     default = {
         "pymodbus": {"port": DEFAULT_MODBUS_PORT, "timeout": DEFAULT_TIMEOUT, "unitCandidates": DEFAULT_UNIT_CANDIDATES, "coilsFallback": DEFAULT_COILS_FALLBACK},
         "gnss": {"host": "192.168.1.50", "port": 2947},
-        "wifi": {"interface": "wlp2s0", "refreshSeconds": 2, "detailedLogFile": "wifi_roaming_detailed.jsonl"},
+        "wifi": {"interface": "wlp2s0", "refreshSeconds": 2, "detailedLogFile": "wifilogs"},
         "display": {"latencyHosts": [{"name": "gateway", "host": "192.168.1.1"}]},
         "vehicles": [
             {

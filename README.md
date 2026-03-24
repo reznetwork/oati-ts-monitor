@@ -131,7 +131,7 @@ The daemon/client use a single JSON config file (default: `monitor_config.json`)
 - `wifi` (optional)
   - `interface` (string): interface name for `iw dev <interface> link`
   - `refreshSeconds` (number): Wi-Fi refresh interval
-  - `detailedLogFile` (string): JSONL file for runtime-toggleable detailed Wi-Fi/roaming logging
+  - `detailedLogFile` (string): optional base directory; captures are saved as one JSONL file per session inside `wifilogs` (default `wifilogs`)
 - `display`
   - `latencyHosts` (array): extra TCP latency probes displayed in the TUI and dashboard
     - each entry: `{ "name": "<label>", "host": "<ip>", "port": <int> }`
@@ -184,7 +184,7 @@ The daemon maintains a live `state` snapshot and rolling history (charts) for:
 
 5. **Detailed Wi‑Fi/roaming logging mode**
    - The web dashboard can toggle this mode at runtime.
-   - While enabled, daemon writes JSONL records into `wifi.detailedLogFile`.
+   - While enabled, daemon writes JSONL records into one file per capture session inside `wifilogs`.
    - Record types:
      - `wifi_sample`: link rates/signal/noise/BSSID/channel/counters, GNSS snapshot, `ts_ms`
      - `roaming_event`: roaming event (`search`, `selection`, `attachment`, `cold_reconnection`), raw details, GNSS snapshot, `ts_ms`

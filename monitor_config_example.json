@@ -16,7 +16,7 @@
   "wifi": {
     "interface": "wlp2s0",
     "refreshSeconds": 2,
-    "detailedLogFile": "wifi_roaming_detailed.jsonl"
+    "detailedLogFile": "wifilogs"
   },
   "display": {
     "latencyHosts": [

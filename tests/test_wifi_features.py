@@ -2,6 +2,7 @@ import json
 import tempfile
 import time
 import unittest
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -49,20 +50,27 @@ class TestWifiFeatures(unittest.TestCase):
 
     def test_detailed_logger_enable_disable(self):
         with tempfile.TemporaryDirectory() as td:
-            log_path = str(Path(td) / "wifi_detailed.jsonl")
-            state = AppState(vehicle=VehicleCfg(name="v", controllers=[]), appcfg=AppCfg())
-            logger = DetailedWifiLogger(state, log_path)
-            logger.start()
-            logger.set_enabled(True)
-            logger.enqueue_roaming_event("search", {"line": "search event"}, {"lat": 1.0, "lon": 2.0}, int(time.time() * 1000))
-            time.sleep(0.2)
-            logger.set_enabled(False)
-            logger.stop()
-            contents = Path(log_path).read_text(encoding="utf-8").strip().splitlines()
-            self.assertGreaterEqual(len(contents), 1)
-            parsed = json.loads(contents[0])
-            self.assertEqual(parsed["type"], "roaming_event")
-            self.assertEqual(parsed["event"], "search")
+            cwd = os.getcwd()
+            try:
+                os.chdir(td)
+                state = AppState(vehicle=VehicleCfg(name="v", controllers=[]), appcfg=AppCfg())
+                logger = DetailedWifiLogger(state, "wifilogs")
+                logger.start()
+                logger.set_enabled(True)
+                logger.enqueue_roaming_event("search", {"line": "search event"}, {"lat": 1.0, "lon": 2.0}, int(time.time() * 1000))
+                time.sleep(0.2)
+                logger.set_enabled(False)
+                logger.stop()
+
+                files = list((Path(td) / "wifilogs").glob("wifi_capture_*.jsonl"))
+                self.assertEqual(len(files), 1)
+                contents = files[0].read_text(encoding="utf-8").strip().splitlines()
+                self.assertGreaterEqual(len(contents), 1)
+                parsed = json.loads(contents[0])
+                self.assertEqual(parsed["type"], "roaming_event")
+                self.assertEqual(parsed["event"], "search")
+            finally:
+                os.chdir(cwd)
 
 
 if __name__ == "__main__":
