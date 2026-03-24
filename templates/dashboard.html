@@ -7,7 +7,7 @@
     body { font-family: Arial, sans-serif; background: #0b1e24; color: #e8f1f2; margin: 0; padding: 0; }
     header { background: #12313b; padding: 10px 16px 8px 16px; font-size: 20px; position: sticky; top: 0; z-index: 1000; border-bottom: 1px solid #1c3a43; }
     .topbar-title { display: flex; align-items: center; gap: 10px; }
-    .topbar-status { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 8px; font-size: 13px; }
+    .topbar-status { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 8px; font-size: 13px; align-items: center; }
     .pill { background: #0d1c22; border: 1px solid #1c3a43; border-radius: 999px; padding: 4px 8px; white-space: nowrap; }
     main { padding: 12px 16px 16px 16px; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
@@ -41,7 +41,6 @@
     <div class="topbar-status" id="topbarStatus"></div>
   </header>
   <main>
-    <section id="controls"></section>
     <section id="latency"></section>
     <section class="grid" id="history"></section>
     <section class="grid" id="controllers"></section>
@@ -57,23 +56,8 @@
     const historyEl = document.getElementById('history');
     const gnssEl = document.getElementById('gnss');
     const wifiEl = document.getElementById('wifi');
-    const controlsEl = document.getElementById('controls');
     const topbarStatusEl = document.getElementById('topbarStatus');
     let wsConn = null;
-
-    function renderControls(snap) {
-      const cfg = snap?.detailed_wifi_logging || {};
-      const enabled = !!cfg.enabled;
-      const btnText = enabled ? 'Disable detailed Wi-Fi log' : 'Enable detailed Wi-Fi log';
-      controlsEl.innerHTML = `<h3>Logging Control</h3><div><button id="toggleWifiLog">${btnText}</button> <span>${enabled ? 'ON' : 'OFF'} ${cfg.file ? `(${cfg.file})` : ''} ${cfg.last_error ? ` - ${cfg.last_error}` : ''}</span></div>`;
-      const btn = document.getElementById('toggleWifiLog');
-      if (btn) {
-        btn.onclick = () => {
-          if (!wsConn || wsConn.readyState !== WebSocket.OPEN) return;
-          wsConn.send(JSON.stringify({ type: 'set_detailed_wifi_logging', enabled: !enabled }));
-        };
-      }
-    }
 
     function latencyMsInt(v) {
       if (typeof v !== 'number' || Number.isNaN(v)) return '--';
@@ -103,7 +87,21 @@
       const level = wifi.signal || (typeof wifi.signal_dbm === 'number' ? `${Math.round(wifi.signal_dbm)} dBm` : '--');
       pills.push(`<span class="pill">WiFi: ${wifi.ssid || '--'} ${level}</span>`);
 
+      const logCfg = state.detailed_wifi_logging || {};
+      const logEnabled = !!logCfg.enabled;
+      const btnText = logEnabled ? 'Stop log' : 'Start log';
+      const status = `${logEnabled ? 'ON' : 'OFF'}${logCfg.file ? ` (${logCfg.file})` : ''}${logCfg.last_error ? ` - ${logCfg.last_error}` : ''}`;
+      pills.push(`<span class="pill">Log: ${status}</span>`);
+      pills.push('<button id="toggleWifiLog" style="height:28px; border-radius:999px; border:1px solid #1c3a43; background:#0d1c22; color:#e8f1f2; padding:0 10px; cursor:pointer;">' + btnText + '</button>');
+
       topbarStatusEl.innerHTML = pills.join('');
+      const btn = document.getElementById('toggleWifiLog');
+      if (btn) {
+        btn.onclick = () => {
+          if (!wsConn || wsConn.readyState !== WebSocket.OPEN) return;
+          wsConn.send(JSON.stringify({ type: 'set_detailed_wifi_logging', enabled: !logEnabled }));
+        };
+      }
     }
 
     function renderControllers(ctrls) {
@@ -301,7 +299,6 @@
       const ageSecs = state.last_update ? (Date.now()/1000 - state.last_update).toFixed(1) : 'n/a';
       ageEl.textContent = `(age ${ageSecs}s)`;
       renderControllers(state.controllers || {});
-      renderControls(state);
       renderTopbarStatus(state);
       latencyEl.innerHTML = '';
       renderHistory(state.history);
