@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>WiFi Logs</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #0b1e24; color: #e8f1f2; margin: 0; padding: 0; }
+    header { background: #12313b; padding: 12px 16px; font-size: 20px; }
+    main { padding: 16px; }
+    a { color: #9ad1d4; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border-bottom: 1px solid #1c3a43; padding: 8px; text-align: left; }
+    .mono { font-family: monospace; }
+  </style>
+</head>
+<body>
+  <header>WiFi Logs <a href="/" style="margin-left: 12px;">Dashboard</a></header>
+  <main>
+    <h3>Capture files</h3>
+    <table>
+      <thead>
+        <tr><th>File</th><th>Size</th><th>Modified</th><th>Actions</th></tr>
+      </thead>
+      <tbody>
+        {% for item in files %}
+        <tr>
+          <td class="mono">{{ item.name }}</td>
+          <td>{{ item.size }}</td>
+          <td>{{ item.modified }}</td>
+          <td>
+            <a href="/wifilogs/view/{{ item.name }}">Review</a> |
+            <a href="/wifilogs/download/{{ item.name }}">Download</a>
+          </td>
+        </tr>
+        {% endfor %}
+        {% if not files %}
+        <tr><td colspan="4">No WiFi capture logs found.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </main>
+</body>
+</html>

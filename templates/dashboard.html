@@ -5,8 +5,11 @@
   <title>Vehicle Monitor</title>
   <style>
     body { font-family: Arial, sans-serif; background: #0b1e24; color: #e8f1f2; margin: 0; padding: 0; }
-    header { background: #12313b; padding: 12px 16px; font-size: 20px; }
-    main { padding: 16px; }
+    header { background: #12313b; padding: 10px 16px 8px 16px; font-size: 20px; position: sticky; top: 0; z-index: 1000; border-bottom: 1px solid #1c3a43; }
+    .topbar-title { display: flex; align-items: center; gap: 10px; }
+    .topbar-status { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 8px; font-size: 13px; }
+    .pill { background: #0d1c22; border: 1px solid #1c3a43; border-radius: 999px; padding: 4px 8px; white-space: nowrap; }
+    main { padding: 12px 16px 16px 16px; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
     .card { background: #11232b; border: 1px solid #1c3a43; border-radius: 6px; padding: 12px; }
     .card h3 { margin-top: 0; }
@@ -33,7 +36,10 @@
   </style>
 </head>
 <body>
-  <header>Vehicle Monitor — <span id="vehicleName"></span> <small id="age"></small></header>
+  <header>
+    <div class="topbar-title">Vehicle Monitor — <span id="vehicleName"></span> <small id="age"></small> <a href="/wifilogs" style="color:#9ad1d4; margin-left: 12px;">WiFi logs</a></div>
+    <div class="topbar-status" id="topbarStatus"></div>
+  </header>
   <main>
     <section id="controls"></section>
     <section id="latency"></section>
@@ -52,6 +58,7 @@
     const gnssEl = document.getElementById('gnss');
     const wifiEl = document.getElementById('wifi');
     const controlsEl = document.getElementById('controls');
+    const topbarStatusEl = document.getElementById('topbarStatus');
     let wsConn = null;
 
     function renderControls(snap) {
@@ -68,15 +75,35 @@
       }
     }
 
-    function renderLatency(data) {
-      if (!data || Object.keys(data).length === 0) { latencyEl.innerHTML = ''; return; }
-      let html = '<h3>Latency checks</h3><ul>';
-      for (const [name, info] of Object.entries(data)) {
-        const cls = info.status === 'OK' ? 'status-ok' : 'status-bad';
-        html += `<li><strong>${name}</strong> (${info.host}:${info.port}): <span class="${cls}">${info.status}</span> ${info.latency || ''}</li>`;
+    function latencyMsInt(v) {
+      if (typeof v !== 'number' || Number.isNaN(v)) return '--';
+      return `${Math.round(v)} ms`;
+    }
+
+    function renderTopbarStatus(state) {
+      const pills = [];
+      const latency = state.display_latency || {};
+      const gateway = latency.gateway || Object.values(latency)[0];
+      if (gateway) {
+        const cls = gateway.status === 'OK' ? 'status-ok' : 'status-bad';
+        pills.push(`<span class="pill">gateway: <span class="${cls}">${gateway.status || '--'}</span> ${latencyMsInt(gateway.latency_ms)}</span>`);
+      } else {
+        pills.push('<span class="pill">gateway: --</span>');
       }
-      html += '</ul>';
-      latencyEl.innerHTML = html;
+
+      for (const [name, info] of Object.entries(state.controllers || {})) {
+        const cls = info.status === 'OK' ? 'status-ok' : 'status-bad';
+        pills.push(`<span class="pill">${name}: <span class="${cls}">${info.status || '--'}</span> ${latencyMsInt(info.latency)}</span>`);
+      }
+
+      const gnss = state.gnss || {};
+      pills.push(`<span class="pill">GNSS: ${gnss.fix || '--'}</span>`);
+
+      const wifi = state.wifi || {};
+      const level = wifi.signal || (typeof wifi.signal_dbm === 'number' ? `${Math.round(wifi.signal_dbm)} dBm` : '--');
+      pills.push(`<span class="pill">WiFi: ${wifi.ssid || '--'} ${level}</span>`);
+
+      topbarStatusEl.innerHTML = pills.join('');
     }
 
     function renderControllers(ctrls) {
@@ -85,7 +112,7 @@
         const card = document.createElement('div');
         card.className = 'card';
         const statusClass = info.status === 'OK' ? 'status-ok' : 'status-bad';
-        card.innerHTML = `<h3>${name}</h3><div>Status: <span class="${statusClass}">${info.status || '—'}</span> Latency: ${info.latency ?? '--'} ms</div>`;
+        card.innerHTML = `<h3>${name}</h3>`;
         const ul = document.createElement('ul');
         ul.className = 'points';
         const meta = info.points_meta || {};
@@ -259,11 +286,9 @@
         makeCard('WiFi RX rate', wifi.rx_rate_mbps, ' Mbps', '#cddc39');
       }
       if (wifi.tx_bytes?.length) {
-        makeCard('WiFi TX bytes', wifi.tx_bytes, ' B', '#26c6da');
         makeCard('WiFi TX throughput', seriesRate(wifi.tx_bytes), ' KB/s', '#00acc1');
       }
       if (wifi.rx_bytes?.length) {
-        makeCard('WiFi RX bytes', wifi.rx_bytes, ' B', '#ab47bc');
         makeCard('WiFi RX throughput', seriesRate(wifi.rx_bytes), ' KB/s', '#8e24aa');
       }
       if (history.cpu_load?.length) {
@@ -277,7 +302,8 @@
       ageEl.textContent = `(age ${ageSecs}s)`;
       renderControllers(state.controllers || {});
       renderControls(state);
-      renderLatency(state.display_latency || {});
+      renderTopbarStatus(state);
+      latencyEl.innerHTML = '';
       renderHistory(state.history);
       renderGnss(state.gnss);
       renderWifi(state.wifi);

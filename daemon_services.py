@@ -1254,10 +1254,61 @@ class WebServer:
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.stop_event = threading.Event()
         self.websockets: set = set()
-        self.template = jinja2.Environment(loader=jinja2.FileSystemLoader(str(TEMPLATE_DIR)), autoescape=True).get_template("dashboard.html")
+        self.jinja = jinja2.Environment(loader=jinja2.FileSystemLoader(str(TEMPLATE_DIR)), autoescape=True)
+        self.template = self.jinja.get_template("dashboard.html")
+        self.logs_template = self.jinja.get_template("wifi_logs.html")
 
     async def index(self, _request: web.Request) -> web.Response:
         return web.Response(text=self.template.render(initial_state=jsonlib.dumps(self.state.snapshot())), content_type="text/html")
+
+    def _wifi_logs_dir(self) -> Path:
+        configured = Path(self.state.appcfg.detailed_wifi_log_file).expanduser() if self.state.appcfg.detailed_wifi_log_file else Path("wifilogs")
+        return (configured.parent / "wifilogs") if configured.suffix else configured
+
+    def _safe_log_file(self, name: str) -> Optional[Path]:
+        if "/" in name or "\\" in name:
+            return None
+        if not name.endswith(".jsonl"):
+            return None
+        path = (self._wifi_logs_dir() / name).resolve()
+        try:
+            path.relative_to(self._wifi_logs_dir().resolve())
+        except Exception:
+            return None
+        return path
+
+    async def wifi_logs_index(self, _request: web.Request) -> web.Response:
+        log_dir = self._wifi_logs_dir()
+        files = []
+        if log_dir.exists():
+            for p in sorted(log_dir.glob("*.jsonl"), key=lambda x: x.stat().st_mtime, reverse=True):
+                st = p.stat()
+                files.append(
+                    {
+                        "name": p.name,
+                        "size": f"{st.st_size} B",
+                        "modified": datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat(),
+                    }
+                )
+        return web.Response(text=self.logs_template.render(files=files), content_type="text/html")
+
+    async def wifi_logs_view(self, request: web.Request) -> web.Response:
+        name = request.match_info.get("name", "")
+        p = self._safe_log_file(name)
+        if p is None or not p.exists():
+            raise web.HTTPNotFound()
+        text = p.read_text(encoding="utf-8", errors="replace")
+        return web.Response(text=text, content_type="text/plain")
+
+    async def wifi_logs_download(self, request: web.Request) -> web.StreamResponse:
+        name = request.match_info.get("name", "")
+        p = self._safe_log_file(name)
+        if p is None or not p.exists():
+            raise web.HTTPNotFound()
+        return web.FileResponse(
+            path=p,
+            headers={"Content-Disposition": f'attachment; filename="{p.name}"'},
+        )
 
     async def websocket_handler(self, request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse()
@@ -1307,7 +1358,15 @@ class WebServer:
 
     async def _run_async(self):
         app = web.Application()
-        app.add_routes([web.get("/", self.index), web.get("/ws", self.websocket_handler)])
+        app.add_routes(
+            [
+                web.get("/", self.index),
+                web.get("/ws", self.websocket_handler),
+                web.get("/wifilogs", self.wifi_logs_index),
+                web.get("/wifilogs/view/{name}", self.wifi_logs_view),
+                web.get("/wifilogs/download/{name}", self.wifi_logs_download),
+            ]
+        )
         runner = web.AppRunner(app)
         await runner.setup()
         await web.TCPSite(runner, self.host, self.port).start()
