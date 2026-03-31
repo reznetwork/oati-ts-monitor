@@ -10,81 +10,842 @@
     "coilsFallback": true
   },
   "gnss": {
-    "host": "172.16.103.3",
-    "port": 2947
+    "host": null,
+    "port": null
   },
   "wifi": {
-    "interface": "wlan0",
-    "refreshSeconds": 2
+    "interface": "wlp2s0",
+    "refreshSeconds": 2,
+    "detailedLogFile": "wifilogs"
   },
   "display": {
     "latencyHosts": [
       {
         "name": "gateway",
-	"port": 80,
-        "host": "10.3.102.129"
+        "host": "10.3.102.129",
+        "port": 80
       }
     ]
   },
   "vehicles": [
     {
-      "name": "eLoader #1",
+      "name": "Багги Segway Villain SSV",
+      "shortName": "segway_villain",
+      "externalIp": "10.3.102.192",
+      "gnss": {
+        "host": "172.16.101.3",
+        "port": 3101,
+        "adminHost": "172.16.101.3",
+        "adminPort": 80
+      },
       "controllers": [
         {
           "name": "MB_IO_1",
-          "model": "ICPDAS ET-7002",
-          "host": "172.16.103.4",
+          "model": "ET-7002/PET-7002",
+          "host": "172.16.101.4",
           "base": 10000,
           "points": [
             {
-              "ref": 10001,
-              "label": "Ручник",
-              "invert": false,
+              "ref": 10005,
+              "label": "Parking_break",
               "style": "handbrake"
             },
             {
-              "ref": 10002,
+              "ref": 10225,
               "label": "Ремень",
-              "invert": true,
+              "style": "seatbelt"
+            }
+          ],
+          "gear_points": {
+            "10000": "P",
+            "10001": "R",
+            "10002": "N",
+            "10003": "H",
+            "10004": "L"
+          }
+        },
+        {
+          "name": "MB_IO_2",
+          "model": "ET-7051",
+          "host": "172.16.101.5",
+          "base": 10000,
+          "points": [
+            {
+              "ref": 10000,
+              "label": "Левый поворотник",
+              "style": "indicator"
+            },
+            {
+              "ref": 10002,
+              "label": "Правый поворотник",
+              "style": "indicator"
+            },
+            {
+              "ref": 10004,
+              "label": "Ближний свет",
+              "style": "light"
+            },
+            {
+              "ref": 10009,
+              "label": "Тормоз",
+              "style": "brake"
+            },
+            {
+              "ref": 10010,
+              "label": "Сигнал",
+              "style": "horn"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Дизельный погрузчик JHLIFT CPCD30NXRW10 (9595MP77)",
+      "shortName": "jhlift_9595",
+      "externalIp": "10.3.102.196",
+      "gnss": {
+        "host": "172.16.106.3",
+        "port": 3101,
+        "adminHost": "172.16.106.3",
+        "adminPort": 80
+      },
+      "controllers": [
+        {
+          "name": "MB_IO_1",
+          "model": "ET-7002/PET-7002",
+          "host": "172.16.106.4",
+          "base": 10000,
+          "points": [
+            {
+              "ref": 10000,
+              "label": "Наклон подъемника на себя"
+            },
+            {
+              "ref": 10001,
+              "label": "Вилы подняты > 30см"
+            },
+            {
+              "ref": 10002,
+              "label": "Давление масла (Зажигание?)",
+              "style": "engine"
+            },
+            {
+              "ref": 10004,
+              "label": "Ремень",
               "style": "seatbelt"
             },
             {
-              "ref": 10003,
+              "ref": 10005,
+              "label": "Звуковой сигнал",
+              "style": "horn"
+            }
+          ]
+        },
+        {
+          "name": "MB_IO_2",
+          "model": "ET-7051",
+          "host": "172.16.106.5",
+          "base": 10000,
+          "points": [
+            {
+              "ref": 10004,
+              "label": "Ручник",
+              "style": "handbrake"
+            },
+            {
+              "ref": 10005,
+              "label": "Левый поворотник",
+              "style": "indicator"
+            },
+            {
+              "ref": 10006,
+              "label": "Тормоз",
+              "style": "brake"
+            },
+            {
+              "ref": 10008,
+              "label": "Правый поворотник",
+              "style": "indicator"
+            },
+            {
+              "ref": 10009,
+              "label": "Ближний свет",
+              "style": "light"
+            }
+          ],
+          "gear_points": {
+            "10000": "F",
+            "10001": "N",
+            "10002": "R"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Дизельный погрузчик JHLIFT CPCD30NXRW10 (9596MP77)",
+      "shortName": "jhlift_9596",
+      "externalIp": "10.3.102.197",
+      "gnss": {
+        "host": "172.16.107.3",
+        "port": 3101,
+        "adminHost": "172.16.107.3",
+        "adminPort": 80
+      },
+      "controllers": [
+        {
+          "name": "MB_IO_1",
+          "model": "ET-7002/PET-7002",
+          "host": "172.16.107.4",
+          "base": 10000,
+          "points": [
+            {
+              "ref": 10000,
+              "label": "Наклон подъемника на себя"
+            },
+            {
+              "ref": 10001,
+              "label": "Вилы подняты > 30см"
+            },
+            {
+              "ref": 10002,
+              "label": "Давление масла (Зажигание?)",
+              "style": "engine"
+            },
+            {
+              "ref": 10004,
+              "label": "Звуковой сигнал",
+              "style": "horn"
+            },
+            {
+              "ref": 10005,
+              "label": "Ремень",
+              "style": "seatbelt"
+            }
+          ]
+        },
+        {
+          "name": "MB_IO_2",
+          "model": "ET-7051",
+          "host": "172.16.107.5",
+          "base": 10000,
+          "points": [
+            {
+              "ref": 10004,
+              "label": "Ручник",
+              "style": "handbrake"
+            },
+            {
+              "ref": 10005,
+              "label": "Левый поворотник",
+              "style": "indicator"
+            },
+            {
+              "ref": 10006,
+              "label": "Тормоз",
+              "style": "brake"
+            },
+            {
+              "ref": 10008,
+              "label": "Правый поворотник",
+              "style": "indicator"
+            },
+            {
+              "ref": 10009,
+              "label": "Ближний свет",
+              "style": "light"
+            }
+          ],
+          "gear_points": {
+            "10000": "F",
+            "10001": "N",
+            "10002": "R"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Квадроцикл CFMOTO CFORCE 600",
+      "shortName": "cfmoto_600",
+      "externalIp": "10.3.102.193",
+      "gnss": {
+        "host": "172.16.105.3",
+        "port": 3101,
+        "adminHost": "172.16.105.3",
+        "adminPort": 80
+      },
+      "controllers": [
+        {
+          "name": "MB_IO_1",
+          "model": "ET-7002/PET-7002",
+          "host": "172.16.105.4",
+          "base": 10000,
+          "gear_points": {
+            "10000": "P",
+            "10001": "R",
+            "10002": "N",
+            "10003": "H",
+            "10004": "L"
+          }
+        },
+        {
+          "name": "MB_IO_2",
+          "model": "ET-7051",
+          "host": "172.16.105.5",
+          "base": 10000,
+          "points": [
+            {
+              "ref": 10000,
+              "label": "Левый поворотник",
+              "style": "indicator"
+            },
+            {
+              "ref": 10002,
+              "label": "Правый поворотник",
+              "style": "indicator"
+            },
+            {
+              "ref": 10004,
+              "label": "Дальний свет",
+              "style": "light"
+            },
+            {
+              "ref": 10005,
+              "label": "Ближний свет",
+              "style": "light"
+            },
+            {
+              "ref": 10009,
+              "label": "Тормоз",
+              "style": "brake"
+            },
+            {
+              "ref": 10010,
+              "label": "Сигнал",
+              "style": "horn"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Трактор LOVOL",
+      "shortName": "lovol",
+      "externalIp": "10.3.102.199",
+      "gnss": {
+        "host": "172.16.109.3",
+        "port": 3101,
+        "adminHost": "172.16.109.3",
+        "adminPort": 80
+      },
+      "controllers": [
+        {
+          "name": "MB_IO_1",
+          "model": null,
+          "host": "172.16.109.4",
+          "base": 0,
+          "points": [
+            {
+              "ref": 0,
+              "label": "Колонна красный"
+            },
+            {
+              "ref": 1,
+              "label": "Колонна зеленый"
+            },
+            {
+              "ref": 2,
+              "label": "Колонна сигнал",
+              "style": "horn"
+            },
+            {
+              "ref": 10000,
+              "label": "Правый поворотник",
+              "style": "indicator"
+            },
+            {
+              "ref": 10001,
+              "label": "Левый поворотник",
+              "style": "indicator"
+            },
+            {
+              "ref": 10002,
               "label": "Двигатель",
-              "invert": true,
               "style": "engine"
             }
           ]
         },
         {
           "name": "MB_IO_2",
-          "model": "ICPDAS ET-7051",
-          "host": "172.16.103.5",
+          "model": null,
+          "host": "172.16.109.5",
           "base": 10000,
           "points": [
             {
               "ref": 10000,
-              "label": "тормоз"
+              "label": "Гудок",
+              "style": "horn"
+            },
+            {
+              "ref": 10001,
+              "label": "Ручник",
+              "style": "handbrake"
             },
             {
               "ref": 10002,
-              "label": "левый поворотник",
+              "label": "Тормоз",
+              "invert": true,
+              "style": "brake"
+            },
+            {
+              "ref": 10006,
+              "label": "Ближний свет",
+              "style": "light"
+            },
+            {
+              "ref": 10008,
+              "label": "Дальний свет",
+              "style": "light"
+            },
+            {
+              "ref": 10009,
+              "label": "Ремень",
+              "invert": true,
+              "style": "seatbelt"
+            }
+          ],
+          "gear_points": {
+            "10004": "R",
+            "10005": "F"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Трактор Беларус 82.1",
+      "shortName": "belarus_82_1",
+      "externalIp": "10.3.102.191",
+      "gnss": {
+        "host": "172.16.102.3",
+        "port": 3101,
+        "adminHost": "172.16.102.3",
+        "adminPort": 80
+      },
+      "controllers": [
+        {
+          "name": "MB_IO_1",
+          "model": null,
+          "host": "172.16.102.4",
+          "base": 10001,
+          "points": [
+            {
+              "ref": 10001,
+              "label": "Ручник",
+              "style": "handbrake"
+            },
+            {
+              "ref": 10002,
+              "label": "Ремень",
+              "style": "seatbelt"
+            },
+            {
+              "ref": 10003,
+              "label": "Двигатель",
+              "style": "engine"
+            }
+          ]
+        },
+        {
+          "name": "MB_IO_2",
+          "model": null,
+          "host": "172.16.102.5",
+          "base": 10000,
+          "points": [
+            {
+              "ref": 10000,
+              "label": "Тормоз",
+              "style": "brake"
+            },
+            {
+              "ref": 10002,
+              "label": "Левый поворотник",
               "style": "indicator"
             },
             {
               "ref": 10003,
-              "label": "правый поворотник",
+              "label": "Правый поворотник",
               "style": "indicator"
             },
             {
               "ref": 10005,
-              "label": "ближний свет"
+              "label": "Ближний свет",
+              "style": "light"
+            },
+            {
+              "ref": 10008,
+              "label": "Ближний свет [10008]",
+              "style": "light"
             },
             {
               "ref": 10009,
-              "label": "Гудок"
+              "label": "Гудок",
+              "style": "horn"
             }
           ]
+        },
+        {
+          "name": "MB_IO_3",
+          "model": "Modbus контроллер КПП",
+          "host": "172.16.102.8",
+          "base": 10001,
+          "gear_points": {
+            "10001": "N",
+            "10002": "F1",
+            "10003": "F2",
+            "10004": "F3",
+            "10005": "F4",
+            "10006": "F5",
+            "10007": "F6",
+            "10008": "F7",
+            "10009": "F8",
+            "10010": "F9",
+            "10021": "R1",
+            "10022": "R2"
+          },
+          "extra_points": {
+            "10023": "SEL"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Трактор Беларус МТЗ 1523",
+      "shortName": "belarus_1523",
+      "externalIp": "10.3.102.198",
+      "gnss": {
+        "host": "172.16.108.3",
+        "port": 3101,
+        "adminHost": "172.16.108.3",
+        "adminPort": 80
+      },
+      "controllers": [
+        {
+          "name": "MB_IO_1",
+          "model": null,
+          "host": "172.16.108.4",
+          "base": 10000,
+          "points": [
+            {
+              "ref": 10000,
+              "label": "Дальний свет",
+              "style": "light"
+            },
+            {
+              "ref": 10001,
+              "label": "Ближний свет",
+              "style": "light"
+            },
+            {
+              "ref": 10002,
+              "label": "Правый поворотник",
+              "style": "indicator"
+            },
+            {
+              "ref": 10004,
+              "label": "Левый поворотник",
+              "style": "indicator"
+            },
+            {
+              "ref": 10005,
+              "label": "Тормоз",
+              "style": "brake"
+            }
+          ]
+        },
+        {
+          "name": "MB_IO_2",
+          "model": null,
+          "host": "172.16.108.5",
+          "base": 10000,
+          "points": [
+            {
+              "ref": 10000,
+              "label": "Ремень",
+              "invert": true,
+              "style": "seatbelt"
+            },
+            {
+              "ref": 10001,
+              "label": "Ручник",
+              "style": "handbrake"
+            },
+            {
+              "ref": 10002,
+              "label": "Гудок",
+              "style": "horn"
+            },
+            {
+              "ref": 10004,
+              "label": "Двигатель",
+              "style": "engine"
+            }
+          ],
+          "gear_points": {
+            "100012": "F",
+            "100013": "FH"
+          },
+          "extra_points": {
+            "10005": "КПП задний"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Экскаватор YACHAI YC 25-8",
+      "shortName": "yachai_25_8",
+      "externalIp": "10.3.102.200",
+      "gnss": {
+        "host": "172.16.110.3",
+        "port": 3101,
+        "adminHost": "172.16.110.3",
+        "adminPort": 80
+      },
+      "controllers": [
+        {
+          "name": "MB_IO_1",
+          "model": null,
+          "host": "172.16.110.4",
+          "base": 0,
+          "points": [
+            {
+              "ref": 0,
+              "label": "Колонна красный"
+            },
+            {
+              "ref": 1,
+              "label": "Колонна зеленый"
+            },
+            {
+              "ref": 2,
+              "label": "Колонна сигнал",
+              "style": "horn"
+            },
+            {
+              "ref": 10000,
+              "label": "Ковш"
+            },
+            {
+              "ref": 10001,
+              "label": "Лапа 2 колено"
+            },
+            {
+              "ref": 10002,
+              "label": "Лапа 1 колено"
+            },
+            {
+              "ref": 10004,
+              "label": "Гудок",
+              "style": "horn"
+            },
+            {
+              "ref": 10005,
+              "label": "Ближний свет",
+              "style": "light"
+            }
+          ]
+        },
+        {
+          "name": "MB_IO_2",
+          "model": null,
+          "host": "172.16.110.5",
+          "base": 10000,
+          "points": [
+            {
+              "ref": 10000,
+              "label": "Ремень",
+              "invert": true,
+              "style": "seatbelt"
+            },
+            {
+              "ref": 10001,
+              "label": "Левый назад"
+            },
+            {
+              "ref": 10002,
+              "label": "Левый вперед"
+            },
+            {
+              "ref": 10005,
+              "label": "Правый вперед"
+            },
+            {
+              "ref": 10007,
+              "label": "Правый назад"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Электропогрузчик JHLIFT CPD20 (9597MP77)",
+      "shortName": "cpd20_9597",
+      "externalIp": "10.3.102.194",
+      "gnss": {
+        "host": "172.16.104.3",
+        "port": 3101,
+        "adminHost": "172.16.104.3",
+        "adminPort": 80
+      },
+      "controllers": [
+        {
+          "name": "MB_IO_1",
+          "model": "ET-7002/PET-7002",
+          "host": "172.16.104.4",
+          "base": 10001,
+          "points": [
+            {
+              "ref": 10001,
+              "label": "Наклон подъемника на себя"
+            },
+            {
+              "ref": 10002,
+              "label": "Вилы подняты > 30см"
+            },
+            {
+              "ref": 10004,
+              "label": "Ручник",
+              "style": "handbrake"
+            },
+            {
+              "ref": 10005,
+              "label": "Ремень",
+              "style": "seatbelt"
+            }
+          ]
+        },
+        {
+          "name": "MB_IO_2",
+          "model": "ET-7051",
+          "host": "172.16.104.5",
+          "base": 10000,
+          "points": [
+            {
+              "ref": 10003,
+              "label": "Левый поворотник",
+              "style": "indicator"
+            },
+            {
+              "ref": 10004,
+              "label": "Правый поворотник",
+              "style": "indicator"
+            },
+            {
+              "ref": 10006,
+              "label": "Ближний свет",
+              "style": "light"
+            },
+            {
+              "ref": 10007,
+              "label": "Parking break",
+              "style": "handbrake"
+            },
+            {
+              "ref": 10008,
+              "label": "Звуковой сигнал",
+              "style": "horn"
+            },
+            {
+              "ref": 10010,
+              "label": "Зажигание",
+              "style": "engine"
+            }
+          ],
+          "gear_points": {
+            "10000": "F",
+            "10001": "N",
+            "10002": "R"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Электропогрузчик JHLIFT CPD20 (9598MP77)",
+      "shortName": "cpd20_9598",
+      "externalIp": "10.3.102.195",
+      "gnss": {
+        "host": "172.16.103.3",
+        "port": 3101,
+        "adminHost": "172.16.103.3",
+        "adminPort": 80
+      },
+      "controllers": [
+        {
+          "name": "MB_IO_1",
+          "model": "ET-7002/PET-7002",
+          "host": "172.16.103.4",
+          "base": 10001,
+          "points": [
+            {
+              "ref": 10001,
+              "label": "Вилы подняты > 30см"
+            },
+            {
+              "ref": 10002,
+              "label": "Наклон подъемника на себя"
+            },
+            {
+              "ref": 10004,
+              "label": "Ручник",
+              "style": "handbrake"
+            },
+            {
+              "ref": 10005,
+              "label": "Ремень",
+              "style": "seatbelt"
+            }
+          ]
+        },
+        {
+          "name": "MB_IO_2",
+          "model": "ET-7051",
+          "host": "172.16.103.5",
+          "base": 10000,
+          "points": [
+            {
+              "ref": 10003,
+              "label": "Левый поворотник",
+              "style": "indicator"
+            },
+            {
+              "ref": 10004,
+              "label": "Правый поворотник",
+              "style": "indicator"
+            },
+            {
+              "ref": 10006,
+              "label": "Ближний свет",
+              "style": "light"
+            },
+            {
+              "ref": 10007,
+              "label": "Parking break",
+              "style": "handbrake"
+            },
+            {
+              "ref": 10008,
+              "label": "Звуковой сигнал",
+              "style": "horn"
+            },
+            {
+              "ref": 10010,
+              "label": "Зажигание",
+              "style": "engine"
+            }
+          ],
+          "gear_points": {
+            "10000": "F",
+            "10001": "N",
+            "10002": "R"
+          }
         }
       ]
     }

@@ -10,8 +10,8 @@
     "coilsFallback": true
   },
   "gnss": {
-    "host": "192.168.1.50",
-    "port": 2947
+    "host": null,
+    "port": null
   },
   "wifi": {
     "interface": "wlp2s0",
@@ -29,6 +29,10 @@
   "vehicles": [
     {
       "name": "Tractor A",
+      "gnss": {
+        "host": "192.168.1.50",
+        "port": 2947
+      },
       "controllers": [
         {
           "name": "MB_IO_1",

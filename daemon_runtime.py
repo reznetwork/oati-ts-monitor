@@ -211,7 +211,7 @@ def run_daemon(args: argparse.Namespace) -> int:
         web_server.start()
     ipc_server = SocketIpcServer(state, poller, args.ipc_bind, args.ipc_port)
     ipc_server.start()
-    print(json.dumps({"daemon": "started", "ipc": f"{args.ipc_bind}:{args.ipc_port}", "vehicle": vehicle.name}))
+    print(json.dumps({"daemon": "started", "ipc": f"{args.ipc_bind}:{args.ipc_port}", "vehicle": vehicle.name, "vehicle_short": getattr(vehicle, "short_name", None)}))
 
     try:
         while not ipc_server.stop_event.is_set():

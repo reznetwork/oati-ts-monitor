@@ -62,6 +62,18 @@ class ControllerCfg:
 class VehicleCfg:
     name: str
     controllers: List[ControllerCfg]
+    short_name: Optional[str] = None
+    gnss_host: Optional[str] = None
+    gnss_port: Optional[int] = None
+    gnss_admin_host: Optional[str] = None
+    gnss_admin_port: Optional[int] = None
+
+
+def derive_short_vehicle_name(name: str) -> str:
+    s = (name or "").strip().lower()
+    s = re.sub(r"[^\w]+", "_", s, flags=re.UNICODE)
+    s = re.sub(r"_+", "_", s).strip("_")
+    return s[:48] if len(s) > 48 else s
 
 
 @dataclass
@@ -490,6 +502,11 @@ def load_config(path: str) -> AppCfg:
             continue
     vehicles: List[VehicleCfg] = []
     for v in raw.get("vehicles", []):
+        v_gnss = v.get("gnss", {}) or {}
+        v_gnss_port = v_gnss.get("port")
+        v_admin_port = v_gnss.get("adminPort")
+        v_short = v.get("shortName") or v.get("short_name") or None
+        v_name = str(v.get("name", "vehicle"))
         ctrls: List[ControllerCfg] = []
         for c in v.get("controllers", []):
             points = [PointCfg(ref=int(p["ref"]), label=str(p["label"]), invert=bool(p.get("invert", False)), style=p.get("style")) for p in c.get("points", [])]
@@ -504,7 +521,17 @@ def load_config(path: str) -> AppCfg:
                     model=c.get("model"),
                 )
             )
-        vehicles.append(VehicleCfg(name=str(v.get("name", "vehicle")), controllers=ctrls))
+        vehicles.append(
+            VehicleCfg(
+                name=v_name,
+                controllers=ctrls,
+                short_name=str(v_short) if v_short else derive_short_vehicle_name(v_name),
+                gnss_host=str(v_gnss.get("host")) if v_gnss.get("host") else None,
+                gnss_port=int(v_gnss_port) if v_gnss_port is not None else None,
+                gnss_admin_host=str(v_gnss.get("adminHost")) if v_gnss.get("adminHost") else None,
+                gnss_admin_port=int(v_admin_port) if v_admin_port is not None else None,
+            )
+        )
     wifi_refresh_raw = wifi_cfg.get("refreshSeconds")
     try:
         wifi_refresh = float(wifi_refresh_raw) if wifi_refresh_raw is not None else None
@@ -1062,8 +1089,10 @@ class Poller:
         self.wifi_refresh_interval = self.appcfg.wifi_refresh if self.appcfg.wifi_refresh is not None else self.args.poll * 2
         self.poll_net_interval = self.args.poll_net
         self._build_clients()
-        if self.appcfg.gnss_host and self.appcfg.gnss_port:
-            self.gnss_client = GNSSClient(self.appcfg.gnss_host, int(self.appcfg.gnss_port))
+        gnss_host = self.vehicle.gnss_host or self.appcfg.gnss_host
+        gnss_port = self.vehicle.gnss_port or self.appcfg.gnss_port
+        if gnss_host and gnss_port:
+            self.gnss_client = GNSSClient(str(gnss_host), int(gnss_port))
             self.gnss_client.start()
         if self.appcfg.wifi_iface:
             self.roaming_watcher = RoamingEventWatcher(self.appcfg.wifi_iface, self._on_roaming_event)
@@ -1459,7 +1488,7 @@ def pick_vehicle(appcfg: AppCfg, selector: Optional[str]) -> VehicleCfg:
     except Exception:
         pass
     for v in appcfg.vehicles:
-        if v.name == selector:
+        if v.name == selector or (v.short_name and v.short_name == selector) or derive_short_vehicle_name(v.name) == selector:
             return v
     raise SystemExit(f"Vehicle '{selector}' not found")
 
