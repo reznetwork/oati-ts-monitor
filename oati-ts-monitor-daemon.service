@@ -5,12 +5,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/PATH/TO/oati-ts-monitor
-ExecStart=/usr/bin/python3 /PATH/TO/oati-ts-monitor/daemon.py \
-  --config /PATH/TO/oati-ts-monitor/monitor_config.json \
-  --poll 1 \
+WorkingDirectory=/srv/oati-ts-monitor
+ExecStart=/usr/bin/python3 /srv/oati-ts-monitor/daemon.py \
+  --config /srv/oati-ts-monitor/monitor_config.json \
+  --poll 1 --vehicle jhlift_9595\
   --ipc-bind 127.0.0.1 --ipc-port 9102 \
-  --http --http-bind 0.0.0.0 --http-port 8080 \
+  --http --http-bind 0.0.0.0 --http-port 9999 \
   --log-file /var/log/oati-ts-monitor/monitor.jsonl --log-interval 1
 
 Restart=always
