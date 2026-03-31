@@ -14,7 +14,7 @@
     "port": null
   },
   "wifi": {
-    "interface": "wlp2s0",
+    "interface": "wlan0",
     "refreshSeconds": 2,
     "detailedLogFile": "wifilogs"
   },
