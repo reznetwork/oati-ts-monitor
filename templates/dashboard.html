@@ -59,15 +59,10 @@
       color: #e8f1f2;
       font-weight: 800;
       display: inline-flex;
-      flex-direction: column;
       align-items: center;
       justify-content: center;
       font-family: monospace;
-      line-height: 1.05;
-      gap: 2px;
     }
-    .gear-label { font-size: 13px; font-weight: 900; font-family: Arial, sans-serif; }
-    .gear-ref { font-size: 10px; opacity: 0.8; }
     .gear-btn.gear-on { background: #1f7a3a; border-color: #4caf50; }
     .gear-btn.gear-unknown { background: #2a2a2a; border-color: #9e9e9e; color: #cfd8dc; }
   </style>
@@ -108,16 +103,6 @@
       return `${Math.round(v)} ms`;
     }
 
-    function escapeAttr(s) {
-      if (s === null || s === undefined) return '';
-      return String(s)
-        .replaceAll('&', '&amp;')
-        .replaceAll('"', '&quot;')
-        .replaceAll("'", '&#39;')
-        .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;');
-    }
-
     function renderTopbarStatus(state) {
       const pills = [];
       const latency = state.display_latency || {};
@@ -131,9 +116,7 @@
 
       for (const [name, info] of Object.entries(state.controllers || {})) {
         const cls = info.status === 'OK' ? 'status-ok' : 'status-bad';
-        const dbg = info.debug || '';
-        const hint = (info.status && info.status !== 'OK' && dbg) ? ` — ${escapeAttr(dbg)}` : '';
-        pills.push(`<span class="pill" title="${escapeAttr(dbg)}">${name}: <span class="${cls}">${info.status || '--'}</span> ${latencyMsInt(info.latency)}${hint}</span>`);
+        pills.push(`<span class="pill">${name}: <span class="${cls}">${info.status || '--'}</span> ${latencyMsInt(info.latency)}</span>`);
       }
 
       const gnss = state.gnss || {};
@@ -160,11 +143,8 @@
       for (const [name, info] of Object.entries(ctrls || {})) {
         const card = document.createElement('div');
         card.className = 'card';
-        if (info && info.debug) card.title = String(info.debug);
         const statusClass = info.status === 'OK' ? 'status-ok' : 'status-bad';
-        const latencyTxt = latencyMsInt(info.latency);
-        const debugTxt = info.debug ? ` — ${escapeAttr(info.debug)}` : '';
-        card.innerHTML = `<h3 title="${escapeAttr(info.debug || '')}">${name}</h3><div class="${statusClass}" style="font-weight:700; margin: -6px 0 6px 0;">${escapeAttr(info.status || '--')} ${escapeAttr(latencyTxt)}${debugTxt}</div>`;
+        card.innerHTML = `<h3>${name}</h3>`;
         const ul = document.createElement('ul');
         ul.className = 'points';
         const meta = info.points_meta || {};
@@ -206,12 +186,10 @@
           gearWrap.innerHTML = '<strong>Gears</strong>';
           const grid = document.createElement('div');
           grid.className = 'gear-grid';
-          const gmeta = info.gears_meta || {};
           for (const [ref, v] of Object.entries(info.gears || {})) {
             const btn = document.createElement('div');
             btn.className = 'gear-btn ' + (v === null ? 'gear-unknown' : (v ? 'gear-on' : 'gear-off'));
-            const label = gmeta[ref] || ref;
-            btn.innerHTML = `<div class="gear-label">${label}</div><div class="gear-ref">${ref}</div>`;
+            btn.textContent = ref;
             grid.appendChild(btn);
           }
           gearWrap.appendChild(grid);
