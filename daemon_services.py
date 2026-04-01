@@ -139,7 +139,7 @@ class AppState:
                 point_meta[str(p.ref)] = {"label": p.label, "style": infer_style(p.label, p.style), "di": p.ref - cfg.base}
             self.controllers[cfg.name] = {
                 "host": cfg.host, "base": cfg.base, "model": cfg.model, "status": "INIT", "latency": None, "debug": "",
-                "points": {}, "points_meta": point_meta, "gears": {}, "extra": {},
+                "points": {}, "points_meta": point_meta, "gears": {}, "gears_meta": {str(ref): label for ref, label in (cfg.gear_points or {}).items()}, "extra": {},
             }
 
     def _append_history(self, series: deque, value: Optional[float], now: Optional[float] = None) -> None:
@@ -899,6 +899,13 @@ class MBClient:
     def ensure_connected(self) -> bool:
         return self.connected or self.connect()
 
+    def close(self) -> None:
+        try:
+            self.client.close()
+        except Exception:
+            pass
+        self.connected = False
+
     def _read_bits(self, start: int, count: int, unit: int, func: str) -> Optional[List[bool]]:
         try:
             rr, err = call_bits(self.client.read_discrete_inputs if func == "di" else self.client.read_coils, start, count, unit)
@@ -911,16 +918,57 @@ class MBClient:
             return list(rr.bits[:count])  # type: ignore
         except Exception as e:
             self.last_error = f"{func} read exception: {e.__class__.__name__}: {e}"
+            # Many devices signal failures by closing the TCP socket; don't keep
+            # a poisoned connection around.
+            self.close()
             return None
+
+    def _refs_to_blocks(
+        self,
+        refs: List[int],
+        *,
+        base: int,
+        max_count: int = 200,
+        max_gap: int = 16,
+    ) -> List[Tuple[int, int, List[int]]]:
+        """
+        Split sparse refs into smaller (start,count) blocks.
+
+        Many Modbus devices reject very large bit reads; configs also often have
+        sparse points (e.g., 1, 1000, 2000). Reading the full min..max span
+        causes server errors and yields all-None reads.
+        """
+        if not refs:
+            return []
+        addrs = sorted(set(int(r) - base for r in refs))
+        blocks: List[Tuple[int, int, List[int]]] = []
+        cur_start = addrs[0]
+        cur_end = addrs[0]
+        cur_refs: List[int] = [cur_start]
+        for a in addrs[1:]:
+            next_span = a - cur_start + 1
+            gap = a - cur_end
+            if next_span > max_count or gap > max_gap:
+                blocks.append((cur_start, cur_end - cur_start + 1, [r + base for r in cur_refs]))
+                cur_start = a
+                cur_end = a
+                cur_refs = [a]
+            else:
+                cur_end = a
+                cur_refs.append(a)
+        blocks.append((cur_start, cur_end - cur_start + 1, [r + base for r in cur_refs]))
+        return blocks
 
     def probe(self, base: int, refs: List[int]) -> bool:
         if not refs:
             self.unit = self.unit or self.unit_candidates[0]
             self.func = "di"
             return True
-        start, count = refs_to_block(refs, base)
         if not self.ensure_connected():
             return False
+        # Probe using the first small block to avoid huge-span reads.
+        block = self._refs_to_blocks(refs[: min(8, len(refs))], base=base, max_count=64, max_gap=8)
+        start, count, _ = block[0] if block else refs_to_block(refs[:1], base)
         for uid in self.unit_candidates:
             bits = self._read_bits(start, count, uid, "di")
             if bits is not None:
@@ -945,20 +993,49 @@ class MBClient:
             return out
         if self.unit is None and not self.probe(base, refs[: min(4, len(refs))]):
             return out
-        start, count = refs_to_block(refs, base)
-        bits = self._read_bits(start, count, self.unit, self.func)  # type: ignore
-        if bits is None:
-            self.client.close()
-            self.connected = False
-            if not self.connect():
-                return out
+        blocks = self._refs_to_blocks(refs, base=base)
+        for start, count, block_refs in blocks:
             bits = self._read_bits(start, count, self.unit, self.func)  # type: ignore
             if bits is None:
-                return out
-        for ref in refs:
-            idx = (ref - base) - start
-            if 0 <= idx < len(bits):
-                out[ref] = bool(bits[idx])
+                # One reconnect retry per block.
+                self.close()
+                if not self.connect():
+                    continue
+                bits = self._read_bits(start, count, self.unit, self.func)  # type: ignore
+                if bits is None:
+                    # If we still can't read, the cached (unit, func) may be stale
+                    # (device reboot / unit-id change / DI-vs-coils mismatch). Re-probe
+                    # using this block and retry once more.
+                    self.unit = None
+                    if not self.probe(base, block_refs[: min(4, len(block_refs))]):
+                        # Last resort: try alternate func if enabled.
+                        if self.use_coils_fallback:
+                            alt = "coils" if self.func == "di" else "di"
+                            bits = self._read_bits(start, count, self.unit_candidates[0], alt)
+                            if bits is None:
+                                continue
+                            self.unit = self.unit_candidates[0]
+                            self.func = alt
+                        else:
+                            continue
+                    else:
+                        bits = self._read_bits(start, count, self.unit, self.func)  # type: ignore
+                        if bits is None and self.use_coils_fallback:
+                            # Some devices will drop the TCP session on illegal function.
+                            # If DI fails, try coils (or vice versa) for this block.
+                            alt = "coils" if self.func == "di" else "di"
+                            bits = self._read_bits(start, count, self.unit, alt)  # type: ignore
+                            if bits is not None:
+                                self.func = alt
+                        if bits is None:
+                            continue
+            for ref in block_refs:
+                idx = (ref - base) - start
+                if 0 <= idx < len(bits):
+                    out[ref] = bool(bits[idx])
+        # Default to short-lived Modbus TCP sessions. Some gateways/IO modules
+        # become unstable with long-lived connections or multiple concurrent clients.
+        self.close()
         return out
 
 
@@ -1069,14 +1146,14 @@ class Poller:
         self.state = state
         self.stop_event = threading.Event()
         self.reconnect_event = threading.Event()
+        self._tcp_check_lock = threading.Lock()
+        self._tcp_check_inflight = False
         self.clients: Dict[str, MBClient] = {}
         self.latency: Dict[str, Optional[float]] = {}
         self.status: Dict[str, str] = {}
         self.debug_msgs: Dict[str, str] = {}
         self.last_net_check_time = 0.0
         self.last_wifi_check_time = 0.0
-        self._tcp_check_lock = threading.Lock()
-        self._tcp_check_inflight = False
         self.gnss_client: Optional[GNSSClient] = None
         self.detailed_wifi_logger = DetailedWifiLogger(self.state, self.appcfg.detailed_wifi_log_file)
         self.roaming_watcher: Optional[RoamingEventWatcher] = None
@@ -1229,11 +1306,16 @@ class Poller:
     def poll_controller(self, cfg: ControllerCfg):
         client = self.clients[cfg.name]
         point_refs = [p.ref for p in cfg.points]
-        point_values = client.read_refs(cfg.base, point_refs) if point_refs else {}
         gear_refs = sorted(cfg.gear_points.keys())
-        gear_values = client.read_refs(cfg.base, gear_refs) if gear_refs else {}
         extra_refs = sorted(cfg.extra_points.keys())
-        extra_values = client.read_refs(cfg.base, extra_refs) if extra_refs else {}
+        all_refs = sorted(set((point_refs or []) + (gear_refs or []) + (extra_refs or [])))
+        t0 = time.perf_counter()
+        all_values = client.read_refs(cfg.base, all_refs) if all_refs else {}
+        t1 = time.perf_counter()
+        read_latency_ms: Optional[float] = (t1 - t0) * 1000.0 if all_refs else None
+        point_values = {r: all_values.get(r) for r in point_refs} if point_refs else {}
+        gear_values = {r: all_values.get(r) for r in gear_refs} if gear_refs else {}
+        extra_values = {r: all_values.get(r) for r in extra_refs} if extra_refs else {}
         status = self.status.get(cfg.name, "OK")
         debug = self.debug_msgs.get(cfg.name, "")
         if point_refs and all(point_values.get(r) is None for r in point_refs):
