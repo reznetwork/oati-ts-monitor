@@ -1075,6 +1075,8 @@ class Poller:
         self.debug_msgs: Dict[str, str] = {}
         self.last_net_check_time = 0.0
         self.last_wifi_check_time = 0.0
+        self._tcp_check_lock = threading.Lock()
+        self._tcp_check_inflight = False
         self.gnss_client: Optional[GNSSClient] = None
         self.detailed_wifi_logger = DetailedWifiLogger(self.state, self.appcfg.detailed_wifi_log_file)
         self.roaming_watcher: Optional[RoamingEventWatcher] = None
@@ -1162,24 +1164,67 @@ class Poller:
     def request_reconnect(self):
         self.reconnect_event.set()
 
+    def _refresh_tcp_status_worker(self):
+        try:
+            timeout = min(float(self.args.timeout or 2.5), 1.5)
+
+            def _check_controller(cfg: ControllerCfg):
+                ok, latency_ms, why = check_tcp(cfg.host, self.args.port, timeout)
+                return cfg.name, ok, latency_ms, why
+
+            def _check_host(entry: Tuple[str, str, int]):
+                name, host, port = entry
+                ok, latency_ms, why = check_tcp(host, port, timeout)
+                return name, host, port, ok, latency_ms, why
+
+            threads: List[threading.Thread] = []
+            ctrl_results: List[Tuple[str, bool, Optional[float], Optional[str]]] = []
+            host_results: List[Tuple[str, str, int, bool, Optional[float], Optional[str]]] = []
+
+            def _run_ctrl(cfg: ControllerCfg):
+                ctrl_results.append(_check_controller(cfg))
+
+            def _run_host(entry: Tuple[str, str, int]):
+                host_results.append(_check_host(entry))
+
+            for cfg in self.vehicle.controllers:
+                t = threading.Thread(target=_run_ctrl, args=(cfg,), daemon=True)
+                threads.append(t)
+                t.start()
+            for entry in self.appcfg.display_latency_hosts:
+                t = threading.Thread(target=_run_host, args=(entry,), daemon=True)
+                threads.append(t)
+                t.start()
+            for t in threads:
+                t.join(timeout=timeout + 0.2)
+
+            for name, ok, latency_ms, why in ctrl_results:
+                self.latency[name] = latency_ms
+                self.status[name] = "OK" if ok else f"TCP {why or 'fail'}"
+                self.debug_msgs[name] = f"TCP ok ({latency_ms:.1f} ms)" if ok and latency_ms is not None else f"TCP check: {why}"
+                self.state.set_controller(name, latency=latency_ms, status=self.status[name], debug=self.debug_msgs.get(name, ""))
+
+            display_latency: Dict[str, Dict[str, Any]] = {}
+            for name, host, port, ok, latency_ms, why in host_results:
+                display_latency[name] = {
+                    "latency": f"{latency_ms:.1f} ms" if latency_ms is not None else "-- ms",
+                    "latency_ms": latency_ms,
+                    "status": "OK" if ok else f"TCP {why or 'fail'}",
+                    "host": host,
+                    "port": str(port),
+                }
+            if display_latency:
+                self.state.set_display_latency(display_latency)
+        finally:
+            with self._tcp_check_lock:
+                self._tcp_check_inflight = False
+
     def refresh_tcp_status(self):
-        for cfg in self.vehicle.controllers:
-            ok, latency_ms, why = check_tcp(cfg.host, self.args.port, self.args.timeout)
-            self.latency[cfg.name] = latency_ms
-            self.status[cfg.name] = "OK" if ok else f"TCP {why or 'fail'}"
-            self.debug_msgs[cfg.name] = f"TCP ok ({latency_ms:.1f} ms)" if ok and latency_ms is not None else f"TCP check: {why}"
-            self.state.set_controller(cfg.name, latency=latency_ms, status=self.status[cfg.name], debug=self.debug_msgs.get(cfg.name, ""))
-        display_latency: Dict[str, Dict[str, Any]] = {}
-        for name, host, port in self.appcfg.display_latency_hosts:
-            ok, latency_ms, why = check_tcp(host, port, self.args.timeout)
-            display_latency[name] = {
-                "latency": f"{latency_ms:.1f} ms" if latency_ms is not None else "-- ms",
-                "latency_ms": latency_ms,
-                "status": "OK" if ok else f"TCP {why or 'fail'}",
-                "host": host,
-                "port": str(port),
-            }
-        self.state.set_display_latency(display_latency)
+        with self._tcp_check_lock:
+            if self._tcp_check_inflight:
+                return
+            self._tcp_check_inflight = True
+        threading.Thread(target=self._refresh_tcp_status_worker, daemon=True).start()
 
     def poll_controller(self, cfg: ControllerCfg):
         client = self.clients[cfg.name]
