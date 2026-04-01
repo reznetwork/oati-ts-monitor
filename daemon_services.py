@@ -1404,23 +1404,29 @@ class WebServer:
         if not self.websockets:
             return
         payload = {"type": "state", "data": self.state.snapshot()}
-        dead: List[web.WebSocketResponse] = []
-        for ws in list(self.websockets):
+        async def _send_one(ws: web.WebSocketResponse) -> Optional[web.WebSocketResponse]:
             try:
-                await ws.send_json(payload)
+                await asyncio.wait_for(ws.send_json(payload), timeout=1.5)
+                return None
             except Exception:
-                dead.append(ws)
-        for ws in dead:
-            self.websockets.discard(ws)
+                return ws
+
+        tasks = [_send_one(ws) for ws in list(self.websockets)]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for r in results:
+            if isinstance(r, web.WebSocketResponse):
+                self.websockets.discard(r)
 
     async def broadcast_loop(self):
         loop = asyncio.get_running_loop()
         while not self.stop_event.is_set():
+            deadline = loop.time() + self.broadcast_interval
+            timeout = max(0.0, deadline - loop.time())
             try:
-                triggered = await loop.run_in_executor(None, self.state.update_event.wait, self.broadcast_interval)
+                triggered = await loop.run_in_executor(None, self.state.update_event.wait, timeout)
             finally:
                 self.state.update_event.clear()
-            if triggered or not self.websockets:
+            if triggered:
                 await self.broadcast_snapshot()
 
     async def _run_async(self):
