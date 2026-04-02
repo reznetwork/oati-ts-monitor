@@ -159,6 +159,7 @@ DEFAULT_MODBUS_PORT = 502
 DEFAULT_TIMEOUT = 2.5
 DEFAULT_UNIT_CANDIDATES = [1, 255, 0]
 DEFAULT_COILS_FALLBACK = True
+MAX_MODBUS_REF_SPAN = 100  # Modbus read 'count' upper bound per request
 HISTORY_WINDOW_SEC = 600
 
 # ---------------- Data models ----------------
@@ -614,6 +615,28 @@ def refs_to_block(refs: List[int], base: int) -> Tuple[int, int]:
     count = end - start + 1
     return start, count
 
+def chunk_refs_by_span(refs: List[int], max_span: int) -> List[List[int]]:
+    """
+    Split refs into chunks where (max(ref) - min(ref) + 1) <= max_span.
+    This bounds the Modbus 'count' computed by refs_to_block().
+    """
+    uniq = sorted(set(refs))
+    if not uniq:
+        return []
+    chunks: List[List[int]] = []
+    start = uniq[0]
+    cur: List[int] = [start]
+    for r in uniq[1:]:
+        if r - start + 1 <= max_span:
+            cur.append(r)
+        else:
+            chunks.append(cur)
+            start = r
+            cur = [r]
+    chunks.append(cur)
+    return chunks
+
+
 def logical_state(invert: bool, raw: Optional[bool]) -> Optional[bool]:
     if raw is None:
         return None
@@ -1034,25 +1057,35 @@ class Poller:
         client = self.clients[cfg.name]
         points = cfg.points
         point_refs = [p.ref for p in points]
-        point_values = client.read_refs(cfg.base, point_refs) if points else {}
         gear_refs = sorted(cfg.gear_points.keys())
-        gear_values = client.read_refs(cfg.base, gear_refs) if gear_refs else {}
         extra_refs = sorted(cfg.extra_points.keys())
-        extra_values = client.read_refs(cfg.base, extra_refs) if extra_refs else {}
+
+        needed_refs = point_refs + gear_refs + extra_refs
+        point_ref_set = set(point_refs)
+        ref_values: Dict[int, Optional[bool]] = {}
+        last_error_points: Optional[str] = None
+
+        for chunk in chunk_refs_by_span(needed_refs, MAX_MODBUS_REF_SPAN):
+            vals = client.read_refs(cfg.base, chunk)
+            ref_values.update(vals)
+            if point_ref_set.intersection(chunk):
+                last_error_points = client.last_error
 
         status = self.status.get(cfg.name, "OK")
         debug = self.debug_msgs.get(cfg.name, "")
 
-        if points and all(point_values.get(r) is None for r in point_refs):
-            status = status if status.startswith("TCP") else "READ ERR"
-            debug = client.last_error or debug
-        else:
-            if not status.startswith("TCP"):
+        if points:
+            if all(ref_values.get(r) is None for r in point_refs):
+                status = status if status.startswith("TCP") else "READ ERR"
+                debug = last_error_points or client.last_error or debug
+            elif not status.startswith("TCP"):
                 status = "OK"
+        elif not status.startswith("TCP"):
+            status = "OK"
 
-        point_payload = {str(p.ref): logical_state(p.invert, point_values.get(p.ref)) for p in points}
-        gear_payload = {str(ref): gear_values.get(ref) for ref in gear_refs}
-        extra_payload = {str(ref): extra_values.get(ref) for ref in extra_refs}
+        point_payload = {str(p.ref): logical_state(p.invert, ref_values.get(p.ref)) for p in points}
+        gear_payload = {str(ref): ref_values.get(ref) for ref in gear_refs}
+        extra_payload = {str(ref): ref_values.get(ref) for ref in extra_refs}
 
         self.state.set_controller(
             cfg.name,
