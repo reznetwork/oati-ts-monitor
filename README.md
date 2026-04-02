@@ -7,6 +7,12 @@ The project now supports a split runtime:
 
 ## Run daemon
 
+## Install dependencies
+
+```bash
+python3 -m pip install -r requirements.txt
+```
+
 ```bash
 python daemon.py --config monitor_config.json --http --http-port 8080 --log-file monitor.jsonl
 ```
