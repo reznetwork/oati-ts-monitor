@@ -22,6 +22,46 @@
     .legend-item { display: inline-flex; align-items: center; gap: 6px; }
     .swatch { width: 14px; height: 3px; border-radius: 2px; display: inline-block; }
     a { color: #9ad1d4; }
+    .fleet-dd { position: relative; display: inline-flex; align-items: center; gap: 6px; }
+    .fleet-btn {
+      height: 28px;
+      border-radius: 6px;
+      border: 1px solid #2a5663;
+      background: #0d1c22;
+      color: #e8f1f2;
+      padding: 0 10px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .fleet-menu {
+      position: absolute;
+      top: calc(100% + 6px);
+      left: 0;
+      min-width: 260px;
+      max-height: 320px;
+      overflow: auto;
+      background: #0d1c22;
+      border: 1px solid #2a5663;
+      border-radius: 8px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+      padding: 6px;
+      display: none;
+      z-index: 2000;
+    }
+    .fleet-menu.open { display: block; }
+    .fleet-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 8px 10px;
+      border-radius: 6px;
+      color: #e8f1f2;
+      text-decoration: none;
+      font-size: 13px;
+    }
+    .fleet-item:hover { background: #11232b; }
+    .fleet-meta { color: #9ad1d4; font-family: monospace; font-size: 12px; }
   </style>
 </head>
 <body>
@@ -30,9 +70,10 @@
       Vehicle Monitor — <span id="vehicleName"></span> <small id="age"></small>
       <label style="margin-left: 10px; font-size: 13px; color:#9ad1d4;">
         Vehicle:
-        <select id="vehicleSelect" style="margin-left: 6px; height: 28px; border-radius: 6px; border: 1px solid #2a5663; background:#0d1c22; color:#e8f1f2; padding: 0 8px;">
-          <option value="">(fleet)</option>
-        </select>
+        <span class="fleet-dd" id="fleetDd">
+          <button id="fleetBtn" class="fleet-btn" type="button">(fleet)</button>
+          <div id="fleetMenu" class="fleet-menu" role="menu" aria-label="Fleet"></div>
+        </span>
       </label>
       <a href="/">Dashboard</a>
       <a href="/wifilogs">WiFi logs</a>
@@ -59,7 +100,9 @@
     const toggleWifiLogBtn = document.getElementById('toggleWifiLog');
     const legendEl = document.getElementById('legend');
     const canvas = document.getElementById('combinedCanvas');
-    const vehicleSelectEl = document.getElementById('vehicleSelect');
+    const fleetDdEl = document.getElementById('fleetDd');
+    const fleetBtnEl = document.getElementById('fleetBtn');
+    const fleetMenuEl = document.getElementById('fleetMenu');
     let wsConn = null;
     let currentLogEnabled = false;
     const FLEET_HTTP_PORT = 9999;
@@ -86,6 +129,10 @@
       return `${name} (--)`;
     }
 
+    function fleetNameOnly(v) {
+      return v?.short_name || v?.name || v?.external_ip || '(fleet)';
+    }
+
     function buildFleetUrl(ip) {
       if (!ip) return null;
       const path = location.pathname || '/combined';
@@ -98,19 +145,24 @@
         || fleet.find((v) => v?.name && state?.vehicle && v.name === state.vehicle)?.external_ip
         || null;
 
-      vehicleSelectEl.innerHTML = '';
-      const placeholder = document.createElement('option');
-      placeholder.value = '';
-      placeholder.textContent = '(fleet)';
-      vehicleSelectEl.appendChild(placeholder);
+      const current = currentIp ? fleet.find((v) => v?.external_ip === currentIp) : null;
+      fleetBtnEl.textContent = current ? fleetNameOnly(current) : '(fleet)';
+
+      fleetMenuEl.innerHTML = '';
       fleet.forEach((v) => {
         const ip = v?.external_ip;
         if (!ip) return;
-        const opt = document.createElement('option');
-        opt.value = ip;
-        opt.textContent = fleetLabel(v);
-        if (currentIp && ip === currentIp) opt.selected = true;
-        vehicleSelectEl.appendChild(opt);
+        const a = document.createElement('a');
+        a.className = 'fleet-item';
+        a.href = buildFleetUrl(ip) || '#';
+        const left = document.createElement('span');
+        left.textContent = fleetLabel(v);
+        const right = document.createElement('span');
+        right.className = 'fleet-meta';
+        right.textContent = ip;
+        a.appendChild(left);
+        a.appendChild(right);
+        fleetMenuEl.appendChild(a);
       });
     }
 
@@ -261,12 +313,12 @@
       ws.onclose = () => setTimeout(connect, 2000);
     }
 
-    vehicleSelectEl.onchange = () => {
-      const ip = vehicleSelectEl.value;
-      if (!ip) return;
-      const url = buildFleetUrl(ip);
-      if (url) window.location.href = url;
+    fleetBtnEl.onclick = () => {
+      fleetMenuEl.classList.toggle('open');
     };
+    document.addEventListener('click', (ev) => {
+      if (!fleetDdEl.contains(ev.target)) fleetMenuEl.classList.remove('open');
+    });
 
     toggleWifiLogBtn.onclick = () => {
       if (!wsConn || wsConn.readyState !== WebSocket.OPEN) return;
