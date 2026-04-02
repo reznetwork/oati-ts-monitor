@@ -64,6 +64,7 @@ class VehicleCfg:
     name: str
     controllers: List[ControllerCfg]
     short_name: Optional[str] = None
+    external_ip: Optional[str] = None
     gnss_host: Optional[str] = None
     gnss_port: Optional[int] = None
     gnss_admin_host: Optional[str] = None
@@ -163,6 +164,15 @@ class AppState:
 
     def snapshot(self) -> Dict[str, Any]:
         with self.lock:
+            fleet = []
+            for v in (self.appcfg.vehicles or []):
+                fleet.append(
+                    {
+                        "name": v.name,
+                        "short_name": v.short_name,
+                        "external_ip": v.external_ip,
+                    }
+                )
             return {
                 "controllers": jsonlib.loads(jsonlib.dumps(self.controllers)),
                 "gnss": jsonlib.loads(jsonlib.dumps(self.gnss)) if self.gnss is not None else None,
@@ -173,6 +183,8 @@ class AppState:
                 "history": self._history_snapshot(),
                 "last_update": self.last_update,
                 "vehicle": self.vehicle.name,
+                "vehicle_short": self.vehicle.short_name,
+                "fleet": fleet,
             }
 
     def set_controller(self, name: str, **kwargs):
@@ -507,6 +519,7 @@ def load_config(path: str) -> AppCfg:
         v_gnss_port = v_gnss.get("port")
         v_admin_port = v_gnss.get("adminPort")
         v_short = v.get("shortName") or v.get("short_name") or None
+        v_external_ip = v.get("externalIp") or v.get("external_ip") or None
         v_name = str(v.get("name", "vehicle"))
         ctrls: List[ControllerCfg] = []
         for c in v.get("controllers", []):
@@ -527,6 +540,7 @@ def load_config(path: str) -> AppCfg:
                 name=v_name,
                 controllers=ctrls,
                 short_name=str(v_short) if v_short else derive_short_vehicle_name(v_name),
+                external_ip=str(v_external_ip) if v_external_ip else None,
                 gnss_host=str(v_gnss.get("host")) if v_gnss.get("host") else None,
                 gnss_port=int(v_gnss_port) if v_gnss_port is not None else None,
                 gnss_admin_host=str(v_gnss.get("adminHost")) if v_gnss.get("adminHost") else None,
@@ -1413,6 +1427,16 @@ class WebServer:
     async def combined_index(self, _request: web.Request) -> web.Response:
         return web.Response(text=self.combined_template.render(initial_state=jsonlib.dumps(self.state.snapshot())), content_type="text/html")
 
+    async def ping(self, _request: web.Request) -> web.Response:
+        # Used by other dashboards to check if this vehicle's web UI is reachable.
+        return web.Response(
+            status=204,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Cache-Control": "no-store",
+            },
+        )
+
     def _wifi_logs_dir(self) -> Path:
         configured = Path(self.state.appcfg.detailed_wifi_log_file).expanduser() if self.state.appcfg.detailed_wifi_log_file else Path("wifilogs")
         return (configured.parent / "wifilogs") if configured.suffix else configured
@@ -1520,6 +1544,7 @@ class WebServer:
             [
                 web.get("/", self.index),
                 web.get("/combined", self.combined_index),
+                web.get("/ping", self.ping),
                 web.get("/ws", self.websocket_handler),
                 web.get("/wifilogs", self.wifi_logs_index),
                 web.get("/wifilogs/view/{name}", self.wifi_logs_view),
