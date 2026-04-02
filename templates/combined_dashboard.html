@@ -81,8 +81,8 @@
       const name = v?.short_name || v?.name || ip || 'vehicle';
       if (!ip) return `${name} (no ip)`;
       const online = onlineByIp[ip];
-      if (online === true) return `${name} (online)`;
-      if (online === false) return `${name} (offline)`;
+      if (online === true) return `${name} ✅`;
+      if (online === false) return `${name} 🚫`;
       return `${name} (--)`;
     }
 
