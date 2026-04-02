@@ -703,7 +703,7 @@
               "label": "Вилы подняты > 30см"
             },
             {
-              "ref": 10004,
+              "ref": 10256,
               "label": "Ручник",
               "style": "handbrake"
             },
@@ -737,8 +737,8 @@
             },
             {
               "ref": 10007,
-              "label": "Parking break",
-              "style": "handbrake"
+              "label": "Тормоз",
+              "style": "break"
             },
             {
               "ref": 10008,
@@ -785,7 +785,7 @@
               "label": "Наклон подъемника на себя"
             },
             {
-              "ref": 10004,
+              "ref": 10256,
               "label": "Ручник",
               "style": "handbrake"
             },
@@ -819,8 +819,8 @@
             },
             {
               "ref": 10007,
-              "label": "Parking break",
-              "style": "handbrake"
+              "label": "Тормоз",
+              "style": "break"
             },
             {
               "ref": 10008,
