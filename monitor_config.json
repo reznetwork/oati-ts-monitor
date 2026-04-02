@@ -705,6 +705,7 @@
             {
               "ref": 10256,
               "label": "Ручник",
+              "invert": true,
               "style": "handbrake"
             },
             {
@@ -787,6 +788,7 @@
             {
               "ref": 10256,
               "label": "Ручник",
+              "invert": true,
               "style": "handbrake"
             },
             {
