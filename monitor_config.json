@@ -778,7 +778,7 @@
             {
               "ref": 10001,
               "label": "Вилы подняты > 30см",
-              "invert": true
+              "invert": false
             },
             {
               "ref": 10002,
