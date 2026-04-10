@@ -21,7 +21,7 @@
   "display": {
     "latencyHosts": [
       {
-        "name": "gateway",
+        "name": "Subnet gateway",
         "host": "10.3.102.129",
         "port": 80
       },
