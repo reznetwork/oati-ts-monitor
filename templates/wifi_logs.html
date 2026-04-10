@@ -11,12 +11,54 @@
     table { border-collapse: collapse; width: 100%; }
     th, td { border-bottom: 1px solid #1c3a43; padding: 8px; text-align: left; }
     .mono { font-family: monospace; }
+    .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 10px 0 14px; }
+    .field { display: flex; gap: 6px; align-items: center; font-size: 13px; }
+    .field label { opacity: 0.9; }
+    .field input, .field select {
+      background: #07161b; color: #e8f1f2; border: 1px solid #1c3a43; border-radius: 6px;
+      padding: 6px 8px; font-size: 13px;
+    }
+    .btn {
+      display: inline-block; background: #1c3a43; border: 1px solid #2b5662; color: #e8f1f2;
+      padding: 6px 10px; border-radius: 6px; text-decoration: none;
+    }
+    .btn:hover { background: #244a55; }
   </style>
 </head>
 <body>
   <header>WiFi Logs <a href="/" style="margin-left: 12px;">Dashboard</a></header>
   <main>
     <h3>Capture files</h3>
+    <div class="toolbar" role="group" aria-label="Map generation options">
+      <div class="field">
+        <label for="opt_downsample">Downsample</label>
+        <input id="opt_downsample" type="number" min="1" step="1" value="1" style="width: 90px;" />
+      </div>
+      <div class="field">
+        <label for="opt_maxjump">Max jump (m)</label>
+        <input id="opt_maxjump" type="number" min="0" step="1" value="0" style="width: 110px;" />
+      </div>
+      <div class="field">
+        <label for="opt_min_db">Min dBm</label>
+        <input id="opt_min_db" type="number" step="1" value="-90" style="width: 90px;" />
+      </div>
+      <div class="field">
+        <label for="opt_max_db">Max dBm</label>
+        <input id="opt_max_db" type="number" step="1" value="-40" style="width: 90px;" />
+      </div>
+      <div class="field">
+        <label for="opt_tiles">Tiles</label>
+        <select id="opt_tiles">
+          <option>OpenStreetMap</option>
+          <option>CartoDB Positron</option>
+          <option>CartoDB Dark_Matter</option>
+          <option>Stamen Terrain</option>
+          <option>Stamen Toner</option>
+        </select>
+      </div>
+      <a class="btn" href="#" onclick="forceRegenerateAll(); return false;">Force regenerate next map</a>
+      <span style="opacity:0.8; font-size:12px;">Tip: click “Map” on a row to generate & open.</span>
+    </div>
     <table>
       <thead>
         <tr><th>File</th><th>Size</th><th>Modified</th><th>Actions</th></tr>
@@ -28,6 +70,7 @@
           <td>{{ item.size }}</td>
           <td>{{ item.modified }}</td>
           <td>
+            <a href="/wifilogs/map/{{ item.name }}" onclick="return openMap('{{ item.name }}');">Map</a> |
             <a href="/wifilogs/view/{{ item.name }}">Review</a> |
             <a href="/wifilogs/download/{{ item.name }}">Download</a>
           </td>
@@ -39,5 +82,51 @@
       </tbody>
     </table>
   </main>
+  <script>
+    (function () {
+      let forceNext = false;
+
+      function q(id) { return document.getElementById(id); }
+      function num(id, dflt) {
+        const el = q(id);
+        const v = el ? el.value : "";
+        const n = Number(v);
+        return Number.isFinite(n) ? n : dflt;
+      }
+      function str(id, dflt) {
+        const el = q(id);
+        const v = el ? String(el.value || "") : "";
+        return v.trim() ? v.trim() : dflt;
+      }
+
+      window.forceRegenerateAll = function () {
+        forceNext = true;
+        alert("Next map generation will be forced (cache bypass).");
+      };
+
+      window.openMap = function (name) {
+        const downsample = Math.max(1, Math.floor(num("opt_downsample", 1)));
+        const maxJump = Math.max(0, num("opt_maxjump", 0));
+        const minDb = num("opt_min_db", -90);
+        const maxDb = num("opt_max_db", -40);
+        const tiles = str("opt_tiles", "OpenStreetMap");
+
+        const params = new URLSearchParams();
+        params.set("downsample", String(downsample));
+        params.set("max_jump_m", String(maxJump));
+        params.set("min_db", String(minDb));
+        params.set("max_db", String(maxDb));
+        params.set("tiles", tiles);
+        if (forceNext) {
+          params.set("force", "1");
+          forceNext = false;
+        }
+
+        const url = "/wifilogs/map/" + encodeURIComponent(name) + "?" + params.toString();
+        window.open(url, "_blank", "noopener");
+        return false;
+      };
+    })();
+  </script>
 </body>
 </html>

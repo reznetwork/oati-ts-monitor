@@ -1498,6 +1498,23 @@ class WebServer:
             return None
         return path
 
+    def _safe_generated_map_file(self, name: str) -> Optional[Path]:
+        """
+        Map HTML is generated from a wifi_capture_*.jsonl and stored under <wifilogs>/out/.
+        """
+        p = self._safe_log_file(name)
+        if p is None:
+            return None
+        out_dir = (self._wifi_logs_dir() / "out").resolve()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        safe_stem = p.stem.replace(" ", "_")
+        out = (out_dir / f"{safe_stem}.map.html").resolve()
+        try:
+            out.relative_to(out_dir)
+        except Exception:
+            return None
+        return out
+
     async def wifi_logs_index(self, _request: web.Request) -> web.Response:
         log_dir = self._wifi_logs_dir()
         files = []
@@ -1529,6 +1546,70 @@ class WebServer:
         return web.FileResponse(
             path=p,
             headers={"Content-Disposition": f'attachment; filename="{p.name}"'},
+        )
+
+    async def wifi_logs_map(self, request: web.Request) -> web.StreamResponse:
+        name = request.match_info.get("name", "")
+        src = self._safe_log_file(name)
+        if src is None or not src.exists():
+            raise web.HTTPNotFound()
+        out = self._safe_generated_map_file(name)
+        if out is None:
+            raise web.HTTPNotFound()
+
+        def _parse_int_qs(key: str, default: int) -> int:
+            try:
+                v = request.query.get(key)
+                return int(v) if v is not None else default
+            except Exception:
+                return default
+
+        def _parse_float_qs(key: str, default: float) -> float:
+            try:
+                v = request.query.get(key)
+                return float(v) if v is not None else default
+            except Exception:
+                return default
+
+        downsample = max(1, _parse_int_qs("downsample", 1))
+        max_jump_m = max(0.0, _parse_float_qs("max_jump_m", 0.0))
+        min_db = _parse_float_qs("min_db", -90.0)
+        max_db = _parse_float_qs("max_db", -40.0)
+        tiles = str(request.query.get("tiles") or "OpenStreetMap")
+        force = str(request.query.get("force") or "").lower() in ("1", "true", "yes", "y", "on")
+
+        async def _render_if_needed() -> None:
+            if not force and out.exists():
+                try:
+                    if out.stat().st_mtime >= src.stat().st_mtime:
+                        return
+                except Exception:
+                    pass
+
+            def _do_render():
+                try:
+                    from wifilog_viewer.viewer import load_wifilog, write_map_html
+                except Exception as e:
+                    raise RuntimeError(f"wifilog_viewer unavailable: {e}") from e
+                samples, events = load_wifilog(src, downsample=downsample, max_jump_m=max_jump_m)
+                write_map_html(samples, out, min_db=min_db, max_db=max_db, tiles=tiles, roaming_events=events)
+
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _do_render)
+
+        try:
+            await _render_if_needed()
+        except Exception as e:
+            return web.Response(
+                status=500,
+                text=f"Map generation failed: {e}\n\nTip: ensure viewer deps are installed (folium/branca).\n",
+                content_type="text/plain",
+                headers={"Cache-Control": "no-store"},
+            )
+
+        return web.FileResponse(
+            path=out,
+            headers={"Cache-Control": "no-store"},
         )
 
     async def websocket_handler(self, request: web.Request) -> web.WebSocketResponse:
@@ -1594,6 +1675,7 @@ class WebServer:
                 web.get("/wifilogs", self.wifi_logs_index),
                 web.get("/wifilogs/view/{name}", self.wifi_logs_view),
                 web.get("/wifilogs/download/{name}", self.wifi_logs_download),
+                web.get("/wifilogs/map/{name}", self.wifi_logs_map),
             ]
         )
         runner = web.AppRunner(app)
