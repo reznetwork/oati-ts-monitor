@@ -228,6 +228,10 @@ class AppState:
             self.update_event.set()
             self.log_event.set()
 
+    def display_latency_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        with self.lock:
+            return jsonlib.loads(jsonlib.dumps(self.display_latency))
+
     def set_cpu_load(self, load: Optional[float]):
         with self.lock:
             self.cpu_load = load
@@ -354,17 +358,41 @@ class DetailedWifiLogger:
             current_file = str(self.current_session_file) if self.current_session_file else None
         self.state.set_detailed_wifi_logging(enabled=self.enabled, file=current_file, last_error=self.last_error)
 
-    def enqueue_wifi_sample(self, wifi: Optional[Dict[str, Any]], gnss: Optional[Dict[str, Any]], ts_ms: int):
+    def enqueue_wifi_sample(
+        self,
+        wifi: Optional[Dict[str, Any]],
+        gnss: Optional[Dict[str, Any]],
+        ts_ms: int,
+        *,
+        gateways: Optional[Dict[str, Dict[str, Any]]] = None,
+    ):
         with self.lock:
             enabled = self.enabled
             session_file = str(self.current_session_file) if self.current_session_file else None
         if not enabled or not session_file or not wifi:
             return
+        gateways_out: Dict[str, Dict[str, Any]] = {}
+        if gateways and isinstance(gateways, dict):
+            # Keep only the fields needed for visualization/analysis.
+            for name, info in gateways.items():
+                try:
+                    if not isinstance(info, dict):
+                        continue
+                    gateways_out[str(name)] = {
+                        "latency_ms": info.get("latency_ms"),
+                        "status": info.get("status"),
+                        "host": info.get("host"),
+                        "port": info.get("port"),
+                    }
+                except Exception:
+                    continue
         self._put(
             {
                 "type": "wifi_sample",
                 "ts_ms": ts_ms,
                 "_session_file": session_file,
+                "vehicle": self.state.vehicle.name,
+                "vehicle_short": self.state.vehicle.short_name,
                 "wifi": {
                     "tx_rate_mbps": wifi.get("tx_rate_mbps"),
                     "rx_rate_mbps": wifi.get("rx_rate_mbps"),
@@ -381,6 +409,7 @@ class DetailedWifiLogger:
                     "bssid_change_ms": wifi.get("bssid_change_ms"),
                 },
                 "gnss": gnss,
+                "gateways": gateways_out or None,
             }
         )
 
@@ -390,7 +419,18 @@ class DetailedWifiLogger:
             session_file = str(self.current_session_file) if self.current_session_file else None
         if not enabled or not session_file:
             return
-        self._put({"type": "roaming_event", "event": event_type, "ts_ms": ts_ms, "_session_file": session_file, "details": details, "gnss": gnss})
+        self._put(
+            {
+                "type": "roaming_event",
+                "event": event_type,
+                "ts_ms": ts_ms,
+                "_session_file": session_file,
+                "vehicle": self.state.vehicle.name,
+                "vehicle_short": self.state.vehicle.short_name,
+                "details": details,
+                "gnss": gnss,
+            }
+        )
 
     def _put(self, payload: Dict[str, Any]) -> None:
         try:
@@ -1375,7 +1415,12 @@ class Poller:
             self.last_channel = wifi.get("channel") if isinstance(wifi.get("channel"), int) else self.last_channel
             self.last_station_stats = station_stats
             self.state.set_wifi(wifi)
-            self.detailed_wifi_logger.enqueue_wifi_sample(wifi, self.state.gnss_snapshot(), ts_ms)
+            self.detailed_wifi_logger.enqueue_wifi_sample(
+                wifi,
+                self.state.gnss_snapshot(),
+                ts_ms,
+                gateways=self.state.display_latency_snapshot(),
+            )
             self.last_wifi_check_time = now
         if self.gnss_client:
             self.state.set_gnss(self.gnss_client.snapshot())

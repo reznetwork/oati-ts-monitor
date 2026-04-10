@@ -130,6 +130,24 @@ class TestWifiFeatures(unittest.TestCase):
         self.assertTrue(len(snap["history"]["wifi"]["tx_bytes"]) >= 1)
         self.assertTrue(len(snap["history"]["wifi"]["rx_bytes"]) >= 1)
 
+    def test_viewer_parses_gateway_latency(self):
+        from wifilog_viewer.viewer import load_wifilog
+
+        payload = {
+            "type": "wifi_sample",
+            "ts_ms": 123,
+            "gnss": {"lat": 1.0, "lon": 2.0},
+            "wifi": {"rssi_dbm": -60.0, "channel": 1},
+            "gateways": {"gateway": {"latency_ms": 12.5, "status": "OK", "host": "192.168.1.1", "port": "502"}},
+        }
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "wifi_capture_test.jsonl"
+            p.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+            samples, events = load_wifilog(p)
+            self.assertEqual(len(events), 0)
+            self.assertEqual(len(samples), 1)
+            self.assertEqual(samples[0].gateway_latency_ms, 12.5)
+
 
 if __name__ == "__main__":
     unittest.main()

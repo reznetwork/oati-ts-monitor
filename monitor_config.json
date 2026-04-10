@@ -24,6 +24,11 @@
         "name": "gateway",
         "host": "10.3.102.129",
         "port": 80
+      },
+      {
+        "name": "Telemetry gateway",
+        "host": "10.3.103.47",
+        "port": 30082
       }
     ]
   },
