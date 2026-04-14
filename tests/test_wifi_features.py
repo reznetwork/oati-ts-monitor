@@ -138,7 +138,10 @@ class TestWifiFeatures(unittest.TestCase):
             "ts_ms": 123,
             "gnss": {"lat": 1.0, "lon": 2.0},
             "wifi": {"rssi_dbm": -60.0, "channel": 1},
-            "gateways": {"gateway": {"latency_ms": 12.5, "status": "OK", "host": "192.168.1.1", "port": "502"}},
+            "gateways": {
+                "Subnet gateway": {"latency_ms": 12.5, "status": "OK", "host": "10.0.0.1", "port": "80"},
+                "Telemetry gateway": {"latency_ms": 55.0, "status": "OK", "host": "10.0.0.2", "port": "30082"},
+            },
         }
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "wifi_capture_test.jsonl"
@@ -146,7 +149,7 @@ class TestWifiFeatures(unittest.TestCase):
             samples, events = load_wifilog(p)
             self.assertEqual(len(events), 0)
             self.assertEqual(len(samples), 1)
-            self.assertEqual(samples[0].gateway_latency_ms, 12.5)
+            self.assertEqual(samples[0].gateways_latency_ms.get("Subnet gateway"), 12.5)
 
 
 if __name__ == "__main__":

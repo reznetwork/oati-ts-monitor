@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO, Any, Optional
 
@@ -18,7 +19,7 @@ class WifiSample:
     channel: Optional[int]
     tx_rate_mbps: Optional[float]
     rx_rate_mbps: Optional[float]
-    gateway_latency_ms: Optional[float]
+    gateways_latency_ms: dict[str, float]
 
 
 @dataclass(frozen=True)
@@ -138,18 +139,16 @@ def load_wifilog(
             bssid_raw = wifi.get("bssid")
             bssid = str(bssid_raw) if bssid_raw else None
             chan = _as_int(wifi.get("channel"))
-            gw_ms: Optional[float] = None
+            gw_map: dict[str, float] = {}
             gateways = rec.get("gateways")
             if isinstance(gateways, dict) and gateways:
-                # Prefer a key literally named "gateway" if present; else if only one entry exists use it.
-                pick: Any = None
-                if "gateway" in gateways and isinstance(gateways.get("gateway"), dict):
-                    pick = gateways.get("gateway")
-                elif len(gateways) == 1:
-                    only = next(iter(gateways.values()))
-                    pick = only if isinstance(only, dict) else None
-                if isinstance(pick, dict):
-                    gw_ms = _as_float(pick.get("latency_ms"))
+                for k, info in gateways.items():
+                    if not isinstance(info, dict):
+                        continue
+                    ms = _as_float(info.get("latency_ms"))
+                    if ms is None:
+                        continue
+                    gw_map[str(k)] = float(ms)
             sample = WifiSample(
                 ts_ms=ts_ms,
                 lat=ll[0],
@@ -160,7 +159,7 @@ def load_wifilog(
                 channel=chan,
                 tx_rate_mbps=_as_float(wifi.get("tx_rate_mbps")),
                 rx_rate_mbps=_as_float(wifi.get("rx_rate_mbps")),
-                gateway_latency_ms=gw_ms,
+                gateways_latency_ms=gw_map,
             )
 
             idx += 1
@@ -192,6 +191,19 @@ def load_wifi_samples(
 
 def _clamp(v: float, lo: float, hi: float) -> float:
     return lo if v < lo else hi if v > hi else v
+
+
+def _format_ts_ms(ts_ms: int) -> str:
+    dt = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
+    return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _sample_tooltip(a: WifiSample, body: str) -> str:
+    return f"{_format_ts_ms(a.ts_ms)}<br/>{body}"
+
+
+def _event_tooltip(ev: RoamingEvent) -> str:
+    return f"{_format_ts_ms(ev.ts_ms)}<br/>{ev.event}"
 
 
 def _palette() -> list[str]:
@@ -264,13 +276,17 @@ def build_map(
     fg_channel = folium.FeatureGroup(name="Channel (categorical)", show=False)
     fg_tx = folium.FeatureGroup(name="TX rate (Mbps)", show=False)
     fg_rx = folium.FeatureGroup(name="RX rate (Mbps)", show=False)
-    fg_gw = folium.FeatureGroup(name="Gateway latency (ms)", show=False)
+    # One gateway-latency layer per gateway name (user can filter/select).
+    gw_names = sorted({k for s in samples for k in (s.gateways_latency_ms or {}).keys()})
+    fg_gw_by_name: dict[str, folium.FeatureGroup] = {
+        n: folium.FeatureGroup(name=f"Gateway latency: {n} (ms)", show=False) for n in gw_names
+    }
     fg_events = folium.FeatureGroup(name="Roaming events", show=False)
 
     bounds: list[list[float]] = []
 
     def _add_segment(
-        fg: folium.FeatureGroup, a: WifiSample, b: WifiSample, value: Optional[float]
+        fg: folium.FeatureGroup, a: WifiSample, b: WifiSample, value: Optional[float], *, subtitle: str
     ) -> None:
         if value is None:
             return
@@ -280,6 +296,7 @@ def build_map(
             color=cm(v),
             weight=5,
             opacity=0.9,
+            tooltip=_sample_tooltip(a, subtitle),
         ).add_to(fg)
 
     bssid_colors: dict[str, str] = {}
@@ -288,7 +305,7 @@ def build_map(
     # For rates, use automatic bounds from available values (avoid empty / degenerate).
     tx_vals = [s.tx_rate_mbps for s in samples if isinstance(s.tx_rate_mbps, (int, float))]
     rx_vals = [s.rx_rate_mbps for s in samples if isinstance(s.rx_rate_mbps, (int, float))]
-    gw_vals = [s.gateway_latency_ms for s in samples if isinstance(s.gateway_latency_ms, (int, float))]
+    gw_vals = [v for s in samples for v in (s.gateways_latency_ms or {}).values() if isinstance(v, (int, float))]
     tx_min = min(tx_vals) if tx_vals else 0.0
     tx_max = max(tx_vals) if tx_vals else 1.0
     rx_min = min(rx_vals) if rx_vals else 0.0
@@ -303,15 +320,37 @@ def build_map(
         gw_max = gw_min + 1.0
     cm_tx = LinearColormap(["#440154", "#21918c", "#fde725"], vmin=tx_min, vmax=tx_max)
     cm_rx = LinearColormap(["#440154", "#21918c", "#fde725"], vmin=rx_min, vmax=rx_max)
-    # Low latency is good -> green; high latency is bad -> red.
-    cm_gw = LinearColormap(["#1a9850", "#fee08b", "#d73027"], vmin=gw_min, vmax=gw_max)
+    # Gateway latency buckets (fixed thresholds).
+    GW_GREEN_MAX = 40.0
+    GW_YELLOW_MAX = 80.0
+    GW_ORANGE_MAX = 200.0
+
+    def _gw_color(ms: float) -> str:
+        v = float(ms)
+        if v <= GW_GREEN_MAX:
+            return "#1a9850"  # green
+        if v <= GW_YELLOW_MAX:
+            return "#fee08b"  # yellow
+        if v <= GW_ORANGE_MAX:
+            return "#fdae61"  # orange
+        return "#d73027"  # red
 
     for a, b in zip(samples, samples[1:]):
         bounds.append([a.lat, a.lon])
         bounds.append([b.lat, b.lon])
-        _add_segment(fg_rssi, a, b, a.rssi_dbm)
+        _add_segment(fg_rssi, a, b, a.rssi_dbm, subtitle=f"rssi {a.rssi_dbm:.0f} dBm" if a.rssi_dbm is not None else "rssi")
         avg_val = a.signal_avg_dbm if a.signal_avg_dbm is not None else a.rssi_dbm
-        _add_segment(fg_avg, a, b, avg_val)
+        _add_segment(
+            fg_avg,
+            a,
+            b,
+            avg_val,
+            subtitle=(
+                f"signal avg {avg_val:.0f} dBm"
+                if avg_val is not None
+                else "signal avg"
+            ),
+        )
 
         if a.bssid:
             col = _cat_color(a.bssid, bssid_colors)
@@ -320,7 +359,7 @@ def build_map(
                 color=col,
                 weight=5,
                 opacity=0.9,
-                tooltip=f"bssid={a.bssid}",
+                tooltip=_sample_tooltip(a, f"bssid={a.bssid}"),
             ).add_to(fg_bssid)
 
         if a.channel is not None:
@@ -331,7 +370,7 @@ def build_map(
                 color=col,
                 weight=5,
                 opacity=0.9,
-                tooltip=f"ch={a.channel}",
+                tooltip=_sample_tooltip(a, f"ch={a.channel}"),
             ).add_to(fg_channel)
 
         if a.tx_rate_mbps is not None:
@@ -341,7 +380,7 @@ def build_map(
                 color=cm_tx(v),
                 weight=5,
                 opacity=0.9,
-                tooltip=f"tx={a.tx_rate_mbps:.1f} Mbps",
+                tooltip=_sample_tooltip(a, f"tx={a.tx_rate_mbps:.1f} Mbps"),
             ).add_to(fg_tx)
 
         if a.rx_rate_mbps is not None:
@@ -351,18 +390,21 @@ def build_map(
                 color=cm_rx(v),
                 weight=5,
                 opacity=0.9,
-                tooltip=f"rx={a.rx_rate_mbps:.1f} Mbps",
+                tooltip=_sample_tooltip(a, f"rx={a.rx_rate_mbps:.1f} Mbps"),
             ).add_to(fg_rx)
 
-        if a.gateway_latency_ms is not None:
-            v = _clamp(float(a.gateway_latency_ms), float(gw_min), float(gw_max))
-            folium.PolyLine(
-                locations=[[a.lat, a.lon], [b.lat, b.lon]],
-                color=cm_gw(v),
-                weight=5,
-                opacity=0.9,
-                tooltip=f"gw={a.gateway_latency_ms:.1f} ms",
-            ).add_to(fg_gw)
+        if fg_gw_by_name:
+            for gname, fg in fg_gw_by_name.items():
+                ms = (a.gateways_latency_ms or {}).get(gname)
+                if ms is None:
+                    continue
+                folium.PolyLine(
+                    locations=[[a.lat, a.lon], [b.lat, b.lon]],
+                    color=_gw_color(float(ms)),
+                    weight=5,
+                    opacity=0.9,
+                    tooltip=_sample_tooltip(a, f"{gname}: {ms:.1f} ms"),
+                ).add_to(fg)
 
     fg_rssi.add_to(m)
     fg_avg.add_to(m)
@@ -370,7 +412,8 @@ def build_map(
     fg_channel.add_to(m)
     fg_tx.add_to(m)
     fg_rx.add_to(m)
-    fg_gw.add_to(m)
+    for fg in fg_gw_by_name.values():
+        fg.add_to(m)
 
     # ---- Legends (custom HTML so we can toggle per layer) ----
     # Note: Folium/branca legends all share the same `.legend` container by default,
@@ -431,10 +474,27 @@ def build_map(
             legend_id="legend_rx",
         )
     )
+    def _legend_steps(items: list[tuple[str, str]]) -> str:
+        rows = "\n".join(
+            f"""<div style="display:flex; align-items:center; gap:8px; margin:2px 0;">
+  <span style="display:inline-block; width:12px; height:12px; border-radius:3px; background:{col}; border:1px solid rgba(0,0,0,0.25);"></span>
+  <span style="white-space:nowrap;">{label}</span>
+</div>"""
+            for label, col in items
+        )
+        return f"<div>{rows}</div>"
+
     _add_html(
         _legend_box(
             "Gateway latency (ms)",
-            _legend_gradient(vmin=float(gw_min), vmax=float(gw_max), colors=["#1a9850", "#fee08b", "#d73027"], unit=""),
+            _legend_steps(
+                [
+                    (f"0–{int(GW_GREEN_MAX)} ms", "#1a9850"),
+                    (f"{int(GW_GREEN_MAX)}–{int(GW_YELLOW_MAX)} ms", "#fee08b"),
+                    (f"{int(GW_YELLOW_MAX)}–{int(GW_ORANGE_MAX)} ms", "#fdae61"),
+                    (f">{int(GW_ORANGE_MAX)} ms", "#d73027"),
+                ]
+            ),
             legend_id="legend_gw",
         )
     )
@@ -479,7 +539,7 @@ def build_map(
                 fill=True,
                 fill_opacity=0.9,
                 weight=2,
-                tooltip=f"{kind}",
+                tooltip=_event_tooltip(ev),
                 popup=folium.Popup("<br/>".join(popup_lines), max_width=420),
             )
             marker.add_to(fg_events)
@@ -500,8 +560,9 @@ def build_map(
         "channel": fg_channel.get_name(),
         "tx": fg_tx.get_name(),
         "rx": fg_rx.get_name(),
-        "gw": fg_gw.get_name(),
+        "gw": [fg.get_name() for fg in fg_gw_by_name.values()],
     }
+    gw_layer_labels = {name: fg.get_name() for name, fg in fg_gw_by_name.items()}
     events_layer_var = fg_events.get_name()
 
     # Start with RSSI visible legend.
@@ -534,17 +595,18 @@ def build_map(
     gw: {json.dumps(layers["gw"])},
     events: {json.dumps(events_layer_var)}
   }};
+  var GW_LABELS = {json.dumps(gw_layer_labels)};
 
   function refreshLegends(map) {{
     var rssi = window[LAYERS.rssi], avg = window[LAYERS.avg];
     var bssid = window[LAYERS.bssid], channel = window[LAYERS.channel];
-    var tx = window[LAYERS.tx], rx = window[LAYERS.rx], gw = window[LAYERS.gw];
+    var tx = window[LAYERS.tx], rx = window[LAYERS.rx];
     setVisible('legend_signal', anyOn(map, [LAYERS.rssi, LAYERS.avg]));
     setVisible('legend_bssid', !!(bssid && map.hasLayer(bssid)));
     setVisible('legend_channel', !!(channel && map.hasLayer(channel)));
     setVisible('legend_tx', !!(tx && map.hasLayer(tx)));
     setVisible('legend_rx', !!(rx && map.hasLayer(rx)));
-    setVisible('legend_gw', !!(gw && map.hasLayer(gw)));
+    setVisible('legend_gw', anyOn(map, LAYERS.gw || []));
   }}
 
   // Roaming event filter (checkboxes by type). Only affects the Roaming events layer.
@@ -558,6 +620,72 @@ def build_map(
             )
         )
         + f"""
+
+  // Gateway latency filter (radio): selects exactly one gateway latency layer to show.
+  function buildGatewayControl(map) {{
+    var names = Object.keys(GW_LABELS || {{}}).sort();
+    if (!names.length) return null;
+    var ctrl = L.control({{position: 'topleft'}});
+    ctrl.onAdd = function() {{
+      var div = L.DomUtil.create('div', 'gw-filter');
+      div.style.background = 'rgba(255,255,255,0.95)';
+      div.style.padding = '8px 10px';
+      div.style.border = '1px solid rgba(0,0,0,0.2)';
+      div.style.borderRadius = '6px';
+      div.style.boxShadow = '0 1px 6px rgba(0,0,0,0.2)';
+      div.style.fontSize = '12px';
+      div.style.lineHeight = '1.25';
+      div.style.maxWidth = '320px';
+      div.style.maxHeight = '220px';
+      div.style.overflow = 'auto';
+      // Place this control below the layers toggle; and below roaming filter if present.
+      div.style.marginTop = (roam.length > 0) ? '160px' : '56px';
+      var html = '';
+      html += '<div style="font-weight:600; margin-bottom:6px;">Gateway latency filter</div>';
+      html += '<label style="display:flex; align-items:center; gap:8px; margin:2px 0; cursor:pointer;">' +
+                '<input type="radio" name="gw_pick" value="__none__" checked />' +
+                '<span>none</span>' +
+              '</label>';
+      names.forEach(function(n) {{
+        html += '<label style="display:flex; align-items:center; gap:8px; margin:2px 0; cursor:pointer;">' +
+                  '<input type="radio" name="gw_pick" value="' + n.replace(/"/g, '&quot;') + '" />' +
+                  '<span>' + n + '</span>' +
+                '</label>';
+      }});
+      div.innerHTML = html;
+      L.DomEvent.disableClickPropagation(div);
+      L.DomEvent.disableScrollPropagation(div);
+
+      function setOnly(name) {{
+        names.forEach(function(n) {{
+          try {{
+            var vn = GW_LABELS[n];
+            var lyr = window[vn];
+            if (!lyr) return;
+            if (n === name) {{
+              if (!map.hasLayer(lyr)) map.addLayer(lyr);
+            }} else {{
+              if (map.hasLayer(lyr)) map.removeLayer(lyr);
+            }}
+          }} catch (e) {{}}
+        }});
+        refreshLegends(map);
+      }}
+
+      setTimeout(function() {{
+        var inputs = div.querySelectorAll('input[name="gw_pick"]');
+        inputs.forEach(function(inp) {{
+          inp.addEventListener('change', function(e) {{
+            var v = e && e.target ? e.target.value : '__none__';
+            if (v === '__none__') return;
+            setOnly(v);
+          }});
+        }});
+      }}, 0);
+      return div;
+    }};
+    return ctrl;
+  }}
 
   function applyRoamFilter(map, selected) {{
     // When events layer is off, do nothing (we avoid re-adding to map).
@@ -641,6 +769,10 @@ def build_map(
     refreshLegends(map);
     if (roam.length > 0) {{
       buildRoamControl(map).addTo(map);
+    }}
+    if (Object.keys(GW_LABELS || {{}}).length > 0) {{
+      var gwCtrl = buildGatewayControl(map);
+      if (gwCtrl) gwCtrl.addTo(map);
     }}
   }}
   initWhenReady(200);
