@@ -12,6 +12,8 @@
     .pill { background: #0d1c22; border: 1px solid #1c3a43; border-radius: 999px; padding: 4px 8px; white-space: nowrap; }
     .log-status-on { color: #4caf50; font-weight: 700; }
     .log-status-off { color: #f44336; font-weight: 700; }
+    .modbus-status-on { color: #4caf50; font-weight: 700; }
+    .modbus-status-off { color: #f44336; font-weight: 700; }
     .log-btn {
       height: 34px;
       border-radius: 8px;
@@ -119,12 +121,15 @@
         </span>
       </label>
       <a href="/combined" style="color:#9ad1d4; margin-left: 12px;">Combined graph</a>
+      <a href="/logs" style="color:#9ad1d4; margin-left: 12px;">App logs</a>
       <a href="/wifilogs" style="color:#9ad1d4; margin-left: 12px;">WiFi logs</a>
     </div>
     <div class="topbar-status" id="topbarStatus"></div>
     <div class="topbar-log-controls">
       <span id="logStatusBadge">Log: OFF</span>
       <button id="toggleWifiLog" class="log-btn">Start log</button>
+      <span id="modbusStatusBadge">Modbus: ON</span>
+      <button id="toggleModbus" class="log-btn">Disable Modbus</button>
     </div>
   </header>
   <main>
@@ -146,11 +151,14 @@
     const topbarStatusEl = document.getElementById('topbarStatus');
     const logStatusBadgeEl = document.getElementById('logStatusBadge');
     const toggleWifiLogBtn = document.getElementById('toggleWifiLog');
+    const modbusStatusBadgeEl = document.getElementById('modbusStatusBadge');
+    const toggleModbusBtn = document.getElementById('toggleModbus');
     const fleetDdEl = document.getElementById('fleetDd');
     const fleetBtnEl = document.getElementById('fleetBtn');
     const fleetMenuEl = document.getElementById('fleetMenu');
     let wsConn = null;
     let currentLogEnabled = false;
+    let currentModbusEnabled = true;
     const FLEET_HTTP_PORT = 9999;
     const onlineByIp = {};
 
@@ -257,6 +265,12 @@
         logStatusBadgeEl.textContent += ` (${logCfg.last_error})`;
       }
       toggleWifiLogBtn.textContent = currentLogEnabled ? 'Stop log' : 'Start log';
+
+      const modbusCfg = state.modbus || {};
+      currentModbusEnabled = modbusCfg.enabled !== false;
+      modbusStatusBadgeEl.className = currentModbusEnabled ? 'modbus-status-on' : 'modbus-status-off';
+      modbusStatusBadgeEl.textContent = `Modbus: ${currentModbusEnabled ? 'ON' : 'OFF'}`;
+      toggleModbusBtn.textContent = currentModbusEnabled ? 'Disable Modbus' : 'Enable Modbus';
     }
 
     function renderControllers(ctrls) {
@@ -506,6 +520,11 @@
     toggleWifiLogBtn.onclick = () => {
       if (!wsConn || wsConn.readyState !== WebSocket.OPEN) return;
       wsConn.send(JSON.stringify({ type: 'set_detailed_wifi_logging', enabled: !currentLogEnabled }));
+    };
+
+    toggleModbusBtn.onclick = () => {
+      if (!wsConn || wsConn.readyState !== WebSocket.OPEN) return;
+      wsConn.send(JSON.stringify({ type: 'set_modbus_enabled', enabled: !currentModbusEnabled }));
     };
 
     render(state);

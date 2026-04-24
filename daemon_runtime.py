@@ -161,6 +161,8 @@ def build_daemon_parser() -> argparse.ArgumentParser:
     ap.add_argument("--http", action="store_true")
     ap.add_argument("--http-bind", type=str, default="0.0.0.0")
     ap.add_argument("--http-port", type=int, default=8080)
+    ap.add_argument("--app-log-file", type=str, default=None, help="Application log file (rotating)")
+    ap.add_argument("--app-log-level", type=str, default=None, help="Application log level (DEBUG/INFO/WARNING/ERROR)")
     ap.add_argument("--log-file", type=str, default=None)
     ap.add_argument("--log-interval", type=float, default=None)
     ap.add_argument("--ipc-bind", type=str, default="127.0.0.1")
@@ -176,6 +178,7 @@ def run_daemon(args: argparse.Namespace) -> int:
         WebServer,
         load_config,
         pick_vehicle,
+        setup_app_logging,
         silence_lib_logs,
         write_default_config,
     )
@@ -202,6 +205,9 @@ def run_daemon(args: argparse.Namespace) -> int:
 
     vehicle = pick_vehicle(appcfg, args.vehicle)
     state = AppState(vehicle, appcfg)
+    app_log_level = args.app_log_level or appcfg.app_log_level or "WARNING"
+    app_log_file = args.app_log_file if args.app_log_file is not None else (appcfg.app_log_file or "logs/app.log")
+    setup_app_logging(state, log_file=app_log_file, level=app_log_level)
     poller = Poller(args, appcfg, vehicle, state)
     poller.start()
     datalogger = DataLogger(state, vehicle, args.log_file, args.log_interval)

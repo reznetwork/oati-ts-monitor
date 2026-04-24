@@ -18,6 +18,10 @@
     "refreshSeconds": 2,
     "detailedLogFile": "wifilogs"
   },
+  "logging": {
+    "appLogFile": "logs/app.log",
+    "appLogLevel": "WARNING"
+  },
   "display": {
     "latencyHosts": [
       {

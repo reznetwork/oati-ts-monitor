@@ -162,6 +162,10 @@ DEFAULT_COILS_FALLBACK = True
 MAX_MODBUS_REF_SPAN = 100  # Modbus read 'count' upper bound per request
 HISTORY_WINDOW_SEC = 600
 
+# Reconnect rate limiting (prevents controller-side session buildup if user spams reconnect)
+RECONNECT_WINDOW_SEC = 30.0
+RECONNECT_MAX_PER_WINDOW = 3
+
 # ---------------- Data models ----------------
 @dataclass
 class PointCfg:
@@ -206,6 +210,7 @@ class AppState:
         self.lock = threading.RLock()
         self.update_event = threading.Event()
         self.log_event = threading.Event()
+        self.modbus_enabled: bool = True
         self.controllers: Dict[str, Dict[str, Any]] = {}
         self.gnss: Optional[Dict[str, Any]] = None
         self.wifi: Optional[Dict[str, Any]] = None
@@ -278,10 +283,17 @@ class AppState:
                 "wifi": jsonlib.loads(jsonlib.dumps(self.wifi)) if self.wifi is not None else None,
                 "cpu_load": self.cpu_load,
                 "display_latency": jsonlib.loads(jsonlib.dumps(self.display_latency)),
+                "modbus": {"enabled": bool(self.modbus_enabled)},
                 "history": self._history_snapshot(),
                 "last_update": self.last_update,
                 "vehicle": self.vehicle.name,
             }
+
+    def set_modbus_enabled(self, enabled: bool) -> None:
+        with self.lock:
+            self.modbus_enabled = bool(enabled)
+            self.last_update = time.time()
+            self.update_event.set()
 
     def set_controller(self, name: str, **kwargs):
         with self.lock:
@@ -801,6 +813,12 @@ class MBClient:
             return self.connect()
         return True
 
+    def close(self) -> None:
+        try:
+            self.client.close()
+        finally:
+            self.connected = False
+
     def _read_bits(self, start: int, count: int, unit: int, func: str) -> Optional[List[bool]]:
         try:
             if func == "di":
@@ -1006,6 +1024,9 @@ class Poller:
         self.gnss_client: Optional[GNSSClient] = None
         self.wifi_refresh_interval = self.appcfg.wifi_refresh if self.appcfg.wifi_refresh is not None else self.args.poll * 2
         self.poll_net_interval = self.args.poll_net
+        self._reconnect_times = deque()  # monotonic timestamps
+        self._modbus_enabled = True
+        self.state.set_modbus_enabled(True)
         self._build_clients()
 
         if self.appcfg.gnss_host and self.appcfg.gnss_port:
@@ -1013,6 +1034,12 @@ class Poller:
             self.gnss_client.start()
 
     def _build_clients(self):
+        # Close old sockets first to avoid controller-side session buildup.
+        for c in (self.clients or {}).values():
+            try:
+                c.close()
+            except Exception:
+                pass
         self.clients = {}
         self.latency = {}
         self.status = {}
@@ -1028,6 +1055,32 @@ class Poller:
 
     def request_reconnect(self):
         self.reconnect_event.set()
+
+    def set_modbus_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self._modbus_enabled:
+            self.state.set_modbus_enabled(enabled)
+            return
+        self._modbus_enabled = enabled
+        self.state.set_modbus_enabled(enabled)
+        if not enabled:
+            for c in (self.clients or {}).values():
+                try:
+                    c.close()
+                except Exception:
+                    pass
+        else:
+            self._build_clients()
+
+    def _allow_reconnect_now(self) -> bool:
+        now = time.monotonic()
+        cutoff = now - RECONNECT_WINDOW_SEC
+        while self._reconnect_times and self._reconnect_times[0] < cutoff:
+            self._reconnect_times.popleft()
+        if len(self._reconnect_times) >= RECONNECT_MAX_PER_WINDOW:
+            return False
+        self._reconnect_times.append(now)
+        return True
 
     def refresh_tcp_status(self):
         for cfg in self.vehicle.controllers:
@@ -1054,6 +1107,9 @@ class Poller:
         self.state.set_display_latency(display_latency)
 
     def poll_controller(self, cfg: ControllerCfg):
+        if not self._modbus_enabled:
+            self.state.set_controller(cfg.name, status="DISABLED", debug="Modbus disabled via UI")
+            return
         client = self.clients[cfg.name]
         points = cfg.points
         point_refs = [p.ref for p in points]
@@ -1110,7 +1166,20 @@ class Poller:
     def run_once(self):
         now = time.monotonic()
         if self.reconnect_event.is_set():
-            self._build_clients()
+            if self._allow_reconnect_now():
+                self._build_clients()
+            else:
+                logging.getLogger("poller").warning(
+                    "Reconnect rate-limit exceeded (%s per %ss)",
+                    RECONNECT_MAX_PER_WINDOW,
+                    int(RECONNECT_WINDOW_SEC),
+                )
+                # Rate-limited: keep existing connections and surface a debug hint.
+                for cfg in self.vehicle.controllers:
+                    self.state.set_controller(
+                        cfg.name,
+                        debug=f"Reconnect rate-limited ({RECONNECT_MAX_PER_WINDOW} per {int(RECONNECT_WINDOW_SEC)}s)",
+                    )
             self.reconnect_event.clear()
         if now - self.last_net_check_time >= self.poll_net_interval:
             self.refresh_tcp_status()
@@ -1519,13 +1588,14 @@ TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 
 
 class WebServer:
-    def __init__(self, state: AppState, host: str, port: int, broadcast_interval: float = 1.0):
+    def __init__(self, state: AppState, host: str, port: int, broadcast_interval: float = 1.0, poller: Optional[Poller] = None):
         if jinja2 is None or web is None:
             raise RuntimeError("aiohttp and jinja2 are required for HTTP mode")
         self.state = state
         self.host = host
         self.port = port
         self.broadcast_interval = broadcast_interval
+        self.poller = poller
         self.thread: Optional[threading.Thread] = None
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.stop_event = threading.Event()
@@ -1546,6 +1616,16 @@ class WebServer:
         try:
             await ws.send_json({"type": "state", "data": self.state.snapshot()})
             async for msg in ws:
+                if msg.type == WSMsgType.TEXT:
+                    try:
+                        body = jsonlib.loads(msg.data)
+                    except Exception:
+                        body = {}
+                    if body.get("type") == "set_modbus_enabled":
+                        enabled = bool(body.get("enabled"))
+                        if self.poller:
+                            self.poller.set_modbus_enabled(enabled)
+                        await ws.send_json({"type": "ack", "command": "set_modbus_enabled", "ok": True, "enabled": enabled})
                 if msg.type == WSMsgType.ERROR:
                     break
         finally:
@@ -1756,7 +1836,7 @@ def main():
     datalogger.start()
     web_server: Optional[WebServer] = None
     if args.http:
-        web_server = WebServer(state, '0.0.0.0', args.http_port, broadcast_interval=args.poll)
+        web_server = WebServer(state, '0.0.0.0', args.http_port, broadcast_interval=args.poll, poller=poller)
         web_server.start()
 
     def wrapped(stdscr):

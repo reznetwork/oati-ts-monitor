@@ -5,7 +5,10 @@ import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import IO, Any, Optional
+from typing import IO, Any, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import folium  # type: ignore[import-not-found]
 
 
 @dataclass(frozen=True)
@@ -13,6 +16,8 @@ class WifiSample:
     ts_ms: int
     lat: float
     lon: float
+    gnss_fix: Optional[str] = None
+    gnss_solution_level: Optional[str] = None
     rssi_dbm: Optional[float]
     signal_avg_dbm: Optional[float]
     bssid: Optional[str]
@@ -153,6 +158,10 @@ def load_wifilog(
                 ts_ms=ts_ms,
                 lat=ll[0],
                 lon=ll[1],
+                gnss_fix=str(gnss.get("fix")) if gnss.get("fix") is not None else None,
+                gnss_solution_level=(
+                    str(gnss.get("solution_level")) if gnss.get("solution_level") is not None else None
+                ),
                 rssi_dbm=_as_float(wifi.get("rssi_dbm")),
                 signal_avg_dbm=_as_float(wifi.get("signal_avg_dbm")),
                 bssid=bssid,
@@ -199,7 +208,9 @@ def _format_ts_ms(ts_ms: int) -> str:
 
 
 def _sample_tooltip(a: WifiSample, body: str) -> str:
-    return f"{_format_ts_ms(a.ts_ms)}<br/>{body}"
+    fix = a.gnss_fix or "--"
+    sol = a.gnss_solution_level or "--"
+    return f"{_format_ts_ms(a.ts_ms)}<br/>GNSS: {fix} [{sol}]<br/>{body}"
 
 
 def _event_tooltip(ev: RoamingEvent) -> str:
@@ -238,9 +249,7 @@ def build_map(
     roaming_events: Optional[list[RoamingEvent]] = None,
 ) -> "folium.Map":
     """
-    Build a folium map with two layers:
-    - RSSI (wifi.rssi_dbm)
-    - Signal avg (wifi.signal_avg_dbm; fallback to rssi_dbm)
+    Build a folium map with WiFi and GNSS context layers.
     """
     import folium
     from branca.colormap import LinearColormap
@@ -272,6 +281,7 @@ def build_map(
 
     fg_rssi = folium.FeatureGroup(name="RSSI (rssi_dbm)", show=True)
     fg_avg = folium.FeatureGroup(name="Signal avg (signal_avg_dbm)", show=False)
+    fg_gnss = folium.FeatureGroup(name="GNSS fix", show=False)
     fg_bssid = folium.FeatureGroup(name="BSSID (categorical)", show=False)
     fg_channel = folium.FeatureGroup(name="Channel (categorical)", show=False)
     fg_tx = folium.FeatureGroup(name="TX rate (Mbps)", show=False)
@@ -334,6 +344,16 @@ def build_map(
         if v <= GW_ORANGE_MAX:
             return "#fdae61"  # orange
         return "#d73027"  # red
+
+    def _gnss_fix_color(fix: Optional[str]) -> str:
+        f = (fix or "").strip().upper()
+        if not f or f in ("NO FIX", "NONE", "INVALID", "0"):
+            return "#d73027"  # red
+        if f in ("DGPS", "DGNSS", "SBAS", "2"):
+            return "#fee08b"  # yellow
+        if f in ("FIX", "GPS", "3D", "3"):
+            return "#1a9850"  # green
+        return "#607d8b"  # gray-blue (unknown/custom)
 
     for a, b in zip(samples, samples[1:]):
         bounds.append([a.lat, a.lon])
@@ -406,8 +426,18 @@ def build_map(
                     tooltip=_sample_tooltip(a, f"{gname}: {ms:.1f} ms"),
                 ).add_to(fg)
 
+        # GNSS fix-status overlay (categorical).
+        folium.PolyLine(
+            locations=[[a.lat, a.lon], [b.lat, b.lon]],
+            color=_gnss_fix_color(a.gnss_fix),
+            weight=5,
+            opacity=0.9,
+            tooltip=_sample_tooltip(a, f"fix={a.gnss_fix or '--'}"),
+        ).add_to(fg_gnss)
+
     fg_rssi.add_to(m)
     fg_avg.add_to(m)
+    fg_gnss.add_to(m)
     fg_bssid.add_to(m)
     fg_channel.add_to(m)
     fg_tx.add_to(m)
@@ -498,6 +528,20 @@ def build_map(
             legend_id="legend_gw",
         )
     )
+    _add_html(
+        _legend_box(
+            "GNSS fix",
+            _legend_steps(
+                [
+                    ("NO FIX / invalid", "#d73027"),
+                    ("DGPS / SBAS", "#fee08b"),
+                    ("FIX / 3D", "#1a9850"),
+                    ("other / unknown", "#607d8b"),
+                ]
+            ),
+            legend_id="legend_gnss",
+        )
+    )
 
     # BSSID / Channel categorical legends (scrollable)
     def _legend_kv(items: list[tuple[str, str]]) -> str:
@@ -556,6 +600,7 @@ def build_map(
     layers = {
         "rssi": fg_rssi.get_name(),
         "avg": fg_avg.get_name(),
+        "gnss": fg_gnss.get_name(),
         "bssid": fg_bssid.get_name(),
         "channel": fg_channel.get_name(),
         "tx": fg_tx.get_name(),
@@ -588,6 +633,7 @@ def build_map(
   var LAYERS = {{
     rssi: {json.dumps(layers["rssi"])},
     avg: {json.dumps(layers["avg"])},
+    gnss: {json.dumps(layers["gnss"])},
     bssid: {json.dumps(layers["bssid"])},
     channel: {json.dumps(layers["channel"])},
     tx: {json.dumps(layers["tx"])},
@@ -599,9 +645,11 @@ def build_map(
 
   function refreshLegends(map) {{
     var rssi = window[LAYERS.rssi], avg = window[LAYERS.avg];
+    var gnss = window[LAYERS.gnss];
     var bssid = window[LAYERS.bssid], channel = window[LAYERS.channel];
     var tx = window[LAYERS.tx], rx = window[LAYERS.rx];
     setVisible('legend_signal', anyOn(map, [LAYERS.rssi, LAYERS.avg]));
+    setVisible('legend_gnss', !!(gnss && map.hasLayer(gnss)));
     setVisible('legend_bssid', !!(bssid && map.hasLayer(bssid)));
     setVisible('legend_channel', !!(channel && map.hasLayer(channel)));
     setVisible('legend_tx', !!(tx && map.hasLayer(tx)));

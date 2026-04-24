@@ -4,6 +4,7 @@ import asyncio
 import json
 import json as jsonlib
 import logging
+import logging.handlers
 import os
 import queue
 import re
@@ -38,6 +39,10 @@ DEFAULT_COILS_FALLBACK = True
 MAX_MODBUS_REF_SPAN = 100  # Modbus read 'count' upper bound per request
 HISTORY_WINDOW_SEC = 600
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
+
+# Reconnect rate limiting (prevents controller-side session buildup if reconnect is spammed)
+RECONNECT_WINDOW_SEC = 30.0
+RECONNECT_MAX_PER_WINDOW = 3
 
 
 @dataclass
@@ -89,6 +94,8 @@ class AppCfg:
     wifi_iface: Optional[str] = None
     wifi_refresh: Optional[float] = None
     detailed_wifi_log_file: Optional[str] = None
+    app_log_file: Optional[str] = None
+    app_log_level: Optional[str] = None
     display_latency_hosts: List[Tuple[str, str, int]] = field(default_factory=list)
     vehicles: List[VehicleCfg] = field(default_factory=list)
 
@@ -115,6 +122,10 @@ class AppState:
         self.lock = threading.RLock()
         self.update_event = threading.Event()
         self.log_event = threading.Event()
+        self.app_log_event = threading.Event()
+        self.modbus_enabled: bool = True
+        self._app_log_seq = 0
+        self._app_logs: deque = deque(maxlen=5000)
         self.controllers: Dict[str, Dict[str, Any]] = {}
         self.gnss: Optional[Dict[str, Any]] = None
         self.wifi: Optional[Dict[str, Any]] = None
@@ -143,6 +154,36 @@ class AppState:
                 "host": cfg.host, "base": cfg.base, "model": cfg.model, "status": "INIT", "latency": None, "debug": "",
                 "points": {}, "points_meta": point_meta, "gears": {}, "extra": {},
             }
+
+    def append_app_log(self, *, line: str, level: str = "INFO", logger: str = "app") -> int:
+        line = (line or "").rstrip("\n")
+        with self.lock:
+            self._app_log_seq += 1
+            seq = self._app_log_seq
+            self._app_logs.append(
+                {
+                    "seq": seq,
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "level": str(level),
+                    "logger": str(logger),
+                    "line": line,
+                }
+            )
+            self.app_log_event.set()
+            return seq
+
+    def app_log_tail(self, limit: int = 50) -> List[Dict[str, Any]]:
+        lim = max(1, min(int(limit or 50), 500))
+        with self.lock:
+            return list(self._app_logs)[-lim:]
+
+    def app_logs_since(self, seq: int) -> List[Dict[str, Any]]:
+        try:
+            seq_int = int(seq or 0)
+        except Exception:
+            seq_int = 0
+        with self.lock:
+            return [item for item in self._app_logs if int(item.get("seq") or 0) > seq_int]
 
     def _append_history(self, series: deque, value: Optional[float], now: Optional[float] = None) -> None:
         if value is None:
@@ -180,6 +221,7 @@ class AppState:
                 "cpu_load": self.cpu_load,
                 "display_latency": jsonlib.loads(jsonlib.dumps(self.display_latency)),
                 "detailed_wifi_logging": jsonlib.loads(jsonlib.dumps(self.detailed_wifi_logging)),
+                "modbus": {"enabled": bool(self.modbus_enabled)},
                 "history": self._history_snapshot(),
                 "last_update": self.last_update,
                 "vehicle": self.vehicle.name,
@@ -250,6 +292,12 @@ class AppState:
     def set_detailed_wifi_logging(self, *, enabled: bool, file: Optional[str], last_error: Optional[str]):
         with self.lock:
             self.detailed_wifi_logging = {"enabled": bool(enabled), "file": file, "last_error": last_error}
+            self.last_update = time.time()
+            self.update_event.set()
+
+    def set_modbus_enabled(self, enabled: bool) -> None:
+        with self.lock:
+            self.modbus_enabled = bool(enabled)
             self.last_update = time.time()
             self.update_event.set()
 
@@ -595,6 +643,9 @@ def load_config(path: str) -> AppCfg:
     if wifi_refresh is not None and wifi_refresh <= 0:
         wifi_refresh = None
     gnss_port = gnss_cfg.get("port")
+    logging_cfg = raw.get("logging", {}) or {}
+    app_log_file = logging_cfg.get("appLogFile") or logging_cfg.get("app_log_file") or None
+    app_log_level = logging_cfg.get("appLogLevel") or logging_cfg.get("app_log_level") or logging_cfg.get("level") or None
     return AppCfg(
         port=modbus_port,
         timeout=timeout,
@@ -605,6 +656,8 @@ def load_config(path: str) -> AppCfg:
         wifi_iface=str(wifi_cfg.get("interface")).strip() if wifi_cfg.get("interface") else None,
         wifi_refresh=wifi_refresh,
         detailed_wifi_log_file=str(wifi_cfg.get("detailedLogFile")).strip() if wifi_cfg.get("detailedLogFile") else None,
+        app_log_file=str(app_log_file).strip() if app_log_file else None,
+        app_log_level=str(app_log_level).strip() if app_log_level else None,
         display_latency_hosts=latency_hosts,
         vehicles=vehicles,
     )
@@ -615,6 +668,7 @@ def write_default_config(path: str) -> None:
         "pymodbus": {"port": DEFAULT_MODBUS_PORT, "timeout": DEFAULT_TIMEOUT, "unitCandidates": DEFAULT_UNIT_CANDIDATES, "coilsFallback": DEFAULT_COILS_FALLBACK},
         "gnss": {"host": "192.168.1.50", "port": 2947},
         "wifi": {"interface": "wlp2s0", "refreshSeconds": 2, "detailedLogFile": "wifilogs"},
+        "logging": {"appLogFile": "logs/app.log", "appLogLevel": "WARNING"},
         "display": {"latencyHosts": [{"name": "gateway", "host": "192.168.1.1"}]},
         "vehicles": [
             {
@@ -976,6 +1030,12 @@ class MBClient:
     def ensure_connected(self) -> bool:
         return self.connected or self.connect()
 
+    def close(self) -> None:
+        try:
+            self.client.close()
+        finally:
+            self.connected = False
+
     def _read_bits(self, start: int, count: int, unit: int, func: str) -> Optional[List[bool]]:
         try:
             rr, err = call_bits(self.client.read_discrete_inputs if func == "di" else self.client.read_coils, start, count, unit)
@@ -1167,7 +1227,10 @@ class Poller:
         self.last_reason_code: Optional[int] = None
         self.wifi_refresh_interval = self.appcfg.wifi_refresh if self.appcfg.wifi_refresh is not None else self.args.poll * 2
         self.poll_net_interval = self.args.poll_net
+        self._reconnect_times = deque()  # monotonic timestamps
         self._build_clients()
+        self._modbus_enabled = True
+        self.state.set_modbus_enabled(True)
         gnss_host = self.vehicle.gnss_host or self.appcfg.gnss_host
         gnss_port = self.vehicle.gnss_port or self.appcfg.gnss_port
         if gnss_host and gnss_port:
@@ -1230,7 +1293,30 @@ class Poller:
     def set_detailed_wifi_logging(self, enabled: bool) -> None:
         self.detailed_wifi_logger.set_enabled(enabled)
 
+    def set_modbus_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self._modbus_enabled:
+            self.state.set_modbus_enabled(enabled)
+            return
+        self._modbus_enabled = enabled
+        self.state.set_modbus_enabled(enabled)
+        if not enabled:
+            for c in (self.clients or {}).values():
+                try:
+                    c.close()
+                except Exception:
+                    pass
+        else:
+            # Recreate clients to ensure a clean reconnect after being disabled.
+            self._build_clients()
+
     def _build_clients(self):
+        # Close old sockets first to avoid controller-side session buildup.
+        for c in (self.clients or {}).values():
+            try:
+                c.close()
+            except Exception:
+                pass
         self.clients = {}
         self.latency = {}
         self.status = {}
@@ -1240,6 +1326,16 @@ class Poller:
 
     def request_reconnect(self):
         self.reconnect_event.set()
+
+    def _allow_reconnect_now(self) -> bool:
+        now = time.monotonic()
+        cutoff = now - RECONNECT_WINDOW_SEC
+        while self._reconnect_times and self._reconnect_times[0] < cutoff:
+            self._reconnect_times.popleft()
+        if len(self._reconnect_times) >= RECONNECT_MAX_PER_WINDOW:
+            return False
+        self._reconnect_times.append(now)
+        return True
 
     def _refresh_tcp_status_worker(self):
         try:
@@ -1304,6 +1400,9 @@ class Poller:
         threading.Thread(target=self._refresh_tcp_status_worker, daemon=True).start()
 
     def poll_controller(self, cfg: ControllerCfg):
+        if not self._modbus_enabled:
+            self.state.set_controller(cfg.name, status="DISABLED", debug="Modbus disabled via UI")
+            return
         client = self.clients[cfg.name]
         point_refs = [p.ref for p in cfg.points]
         gear_refs = sorted(cfg.gear_points.keys())
@@ -1348,7 +1447,19 @@ class Poller:
     def run_once(self):
         now = time.monotonic()
         if self.reconnect_event.is_set():
-            self._build_clients()
+            if self._allow_reconnect_now():
+                self._build_clients()
+            else:
+                logging.getLogger("poller").warning(
+                    "Reconnect rate-limit exceeded (%s per %ss)",
+                    RECONNECT_MAX_PER_WINDOW,
+                    int(RECONNECT_WINDOW_SEC),
+                )
+                for cfg in self.vehicle.controllers:
+                    self.state.set_controller(
+                        cfg.name,
+                        debug=f"Reconnect rate-limited ({RECONNECT_MAX_PER_WINDOW} per {int(RECONNECT_WINDOW_SEC)}s)",
+                    )
             self.reconnect_event.clear()
         if now - self.last_net_check_time >= self.poll_net_interval:
             self.refresh_tcp_status()
@@ -1465,12 +1576,20 @@ class WebServer:
         self.template = self.jinja.get_template("dashboard.html")
         self.combined_template = self.jinja.get_template("combined_dashboard.html")
         self.logs_template = self.jinja.get_template("wifi_logs.html")
+        self.app_logs_template = self.jinja.get_template("app_logs.html")
 
     async def index(self, _request: web.Request) -> web.Response:
         return web.Response(text=self.template.render(initial_state=jsonlib.dumps(self.state.snapshot())), content_type="text/html")
 
     async def combined_index(self, _request: web.Request) -> web.Response:
         return web.Response(text=self.combined_template.render(initial_state=jsonlib.dumps(self.state.snapshot())), content_type="text/html")
+
+    async def app_logs_index(self, _request: web.Request) -> web.Response:
+        initial = {
+            "state": self.state.snapshot(),
+            "logs": self.state.app_log_tail(50),
+        }
+        return web.Response(text=self.app_logs_template.render(initial_state=jsonlib.dumps(initial)), content_type="text/html")
 
     async def ping(self, _request: web.Request) -> web.Response:
         # Used by other dashboards to check if this vehicle's web UI is reachable.
@@ -1629,10 +1748,44 @@ class WebServer:
                         if self.poller:
                             self.poller.set_detailed_wifi_logging(enabled)
                         await ws.send_json({"type": "ack", "command": "set_detailed_wifi_logging", "ok": True, "enabled": enabled})
+                    if body.get("type") == "set_modbus_enabled":
+                        enabled = bool(body.get("enabled"))
+                        if self.poller:
+                            self.poller.set_modbus_enabled(enabled)
+                        await ws.send_json({"type": "ack", "command": "set_modbus_enabled", "ok": True, "enabled": enabled})
                 if msg.type == WSMsgType.ERROR:
                     break
         finally:
             self.websockets.discard(ws)
+        return ws
+
+    async def websocket_logs_handler(self, request: web.Request) -> web.WebSocketResponse:
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        last_seq = 0
+        try:
+            init = self.state.app_log_tail(50)
+            if init:
+                last_seq = int(init[-1].get("seq") or 0)
+            await ws.send_json({"type": "log_init", "data": {"lines": init}})
+            loop = asyncio.get_running_loop()
+            while not self.stop_event.is_set():
+                try:
+                    triggered = await loop.run_in_executor(None, self.state.app_log_event.wait, 1.0)
+                finally:
+                    self.state.app_log_event.clear()
+                if not triggered:
+                    continue
+                lines = self.state.app_logs_since(last_seq)
+                if not lines:
+                    continue
+                last_seq = int(lines[-1].get("seq") or last_seq)
+                await ws.send_json({"type": "log", "data": {"lines": lines}})
+        finally:
+            try:
+                await ws.close()
+            except Exception:
+                pass
         return ws
 
     async def broadcast_snapshot(self):
@@ -1670,8 +1823,10 @@ class WebServer:
             [
                 web.get("/", self.index),
                 web.get("/combined", self.combined_index),
+                web.get("/logs", self.app_logs_index),
                 web.get("/ping", self.ping),
                 web.get("/ws", self.websocket_handler),
+                web.get("/wslogs", self.websocket_logs_handler),
                 web.get("/wifilogs", self.wifi_logs_index),
                 web.get("/wifilogs/view/{name}", self.wifi_logs_view),
                 web.get("/wifilogs/download/{name}", self.wifi_logs_download),
@@ -1736,4 +1891,61 @@ def pick_vehicle(appcfg: AppCfg, selector: Optional[str]) -> VehicleCfg:
     raise SystemExit(f"Vehicle '{selector}' not found")
 
 
-__all__ = ["AppState", "DataLogger", "Poller", "WebServer", "load_config", "pick_vehicle", "silence_lib_logs", "write_default_config"]
+__all__ = [
+    "AppState",
+    "DataLogger",
+    "Poller",
+    "WebServer",
+    "load_config",
+    "pick_vehicle",
+    "setup_app_logging",
+    "silence_lib_logs",
+    "write_default_config",
+]
+
+
+class _StateTailLogHandler(logging.Handler):
+    def __init__(self, state: AppState, level: int = logging.NOTSET):
+        super().__init__(level=level)
+        self.state = state
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = self.format(record)
+            self.state.append_app_log(line=msg, level=record.levelname, logger=record.name)
+        except Exception:
+            # Never let logging break the daemon.
+            return
+
+
+def setup_app_logging(state: AppState, *, log_file: Optional[str], level: str = "INFO") -> None:
+    """
+    App-wide logging:
+    - Rotating log file (for persistence)
+    - In-memory ring buffer (for /logs live tail)
+    """
+    lvl = getattr(logging, str(level or "WARNING").upper(), logging.WARNING)
+    root = logging.getLogger()
+    root.setLevel(lvl)
+
+    fmt = logging.Formatter("%(asctime)sZ %(levelname)s [%(name)s] %(message)s")
+
+    tail_handler = _StateTailLogHandler(state, level=lvl)
+    tail_handler.setFormatter(fmt)
+    root.addHandler(tail_handler)
+
+    if log_file:
+        try:
+            path = Path(str(log_file)).expanduser()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            file_handler = logging.handlers.RotatingFileHandler(
+                filename=str(path),
+                maxBytes=5 * 1024 * 1024,
+                backupCount=5,
+                encoding="utf-8",
+            )
+            file_handler.setLevel(lvl)
+            file_handler.setFormatter(fmt)
+            root.addHandler(file_handler)
+        except Exception as e:
+            state.append_app_log(line=f"Failed to set up file logging: {e}", level="ERROR", logger="logger")
