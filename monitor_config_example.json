@@ -20,7 +20,20 @@
   },
   "logging": {
     "appLogFile": "logs/app.log",
-    "appLogLevel": "WARNING"
+    "appLogLevel": "WARNING",
+    "full": {
+      "enabled": true,
+      "dir": "logs/full",
+      "snapshotIntervalSec": 1.0,
+      "rotateBytes": 5242880
+    }
+  },
+  "upload": {
+    "enabled": false,
+    "url": "http://collector:9000/ingest",
+    "deviceId": "device-001",
+    "chunkBytes": 262144,
+    "stateFile": "logs/upload_state.json"
   },
   "display": {
     "latencyHosts": [

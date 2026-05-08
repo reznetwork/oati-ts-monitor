@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO, Any, Optional, TYPE_CHECKING
@@ -18,13 +18,13 @@ class WifiSample:
     lon: float
     gnss_fix: Optional[str] = None
     gnss_solution_level: Optional[str] = None
-    rssi_dbm: Optional[float]
-    signal_avg_dbm: Optional[float]
-    bssid: Optional[str]
-    channel: Optional[int]
-    tx_rate_mbps: Optional[float]
-    rx_rate_mbps: Optional[float]
-    gateways_latency_ms: dict[str, float]
+    rssi_dbm: Optional[float] = None
+    signal_avg_dbm: Optional[float] = None
+    bssid: Optional[str] = None
+    channel: Optional[int] = None
+    tx_rate_mbps: Optional[float] = None
+    rx_rate_mbps: Optional[float] = None
+    gateways_latency_ms: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

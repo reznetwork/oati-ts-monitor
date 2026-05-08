@@ -37,6 +37,15 @@ Optional services:
 - `--http-bind` (default `0.0.0.0`) and `--http-port` (default `8080`)
 - `--log-file` enable JSONL data logging to that file
 - `--log-interval` seconds between log writes (omit for “on change” logging)
+- `--full-log` enable full-fidelity segmented JSONL logging (lossless `state.snapshot()` + derived events)
+- `--full-log-dir` base directory for full logs (default from config or `logs/full`)
+- `--full-log-interval` full snapshot interval seconds (default from config)
+- `--full-log-rotate-bytes` rotate segment after N bytes (default from config)
+- `--upload` enable background HTTP upload of full logs (chunked, resumable)
+- `--upload-url` collector endpoint for chunk uploads
+- `--upload-device-id` device identifier to include in upload headers
+- `--upload-chunk-bytes` chunk size in bytes
+- `--upload-state-file` upload cursor state JSON path
 
 IPC (client communication):
 - `--ipc-bind` (default `127.0.0.1`) and `--ipc-port` (default `9102`)

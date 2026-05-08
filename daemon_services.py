@@ -13,6 +13,8 @@ import socket
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -40,6 +42,9 @@ DEFAULT_COILS_FALLBACK = True
 MAX_MODBUS_REF_SPAN = 100  # Modbus read 'count' upper bound per request
 HISTORY_WINDOW_SEC = 600
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
+
+# Full-fidelity log schema
+FULL_LOG_SCHEMA_VERSION = 1
 
 # Reconnect rate limiting (prevents controller-side session buildup if reconnect is spammed)
 RECONNECT_WINDOW_SEC = 30.0
@@ -193,6 +198,17 @@ class AppCfg:
     detailed_wifi_log_file: Optional[str] = None
     app_log_file: Optional[str] = None
     app_log_level: Optional[str] = None
+    # Full-fidelity always-on logging (JSONL)
+    full_log_enabled: bool = False
+    full_log_dir: str = "logs/full"
+    full_log_snapshot_interval_sec: float = 1.0
+    full_log_rotate_bytes: int = 5 * 1024 * 1024
+    # HTTP upload (chunked, resumable)
+    upload_enabled: bool = False
+    upload_url: Optional[str] = None
+    upload_device_id: Optional[str] = None
+    upload_chunk_bytes: int = 256 * 1024
+    upload_state_file: str = "logs/upload_state.json"
     display_latency_hosts: List[Tuple[str, str, int]] = field(default_factory=list)
     vehicles: List[VehicleCfg] = field(default_factory=list)
 
@@ -465,6 +481,414 @@ class DataLogger:
                 if triggered or self.interval is not None:
                     fh.write(jsonlib.dumps(self._build_entry(self.state.snapshot()), ensure_ascii=False) + "\n")
                     fh.flush()
+
+
+def _epoch_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _default_device_id() -> str:
+    try:
+        return socket.gethostname()
+    except Exception:
+        return "unknown"
+
+
+def make_full_log_record(*, record_type: str, ts_ms: int, source: Dict[str, Any], data: Any) -> Dict[str, Any]:
+    """
+    Full-fidelity JSONL record (one object per line).
+    """
+    return {
+        "v": FULL_LOG_SCHEMA_VERSION,
+        "ts_ms": int(ts_ms),
+        "source": source,
+        "type": str(record_type),
+        "data": data,
+    }
+
+
+class FullFidelityLogger:
+    """
+    Always-on full-fidelity logging into rotated JSONL segment files.
+    """
+
+    def __init__(self, state: AppState, *, enabled: bool, base_dir: str, snapshot_interval_sec: float, rotate_bytes: int):
+        self.state = state
+        self.enabled = bool(enabled)
+        self.base_dir = str(base_dir or "logs/full")
+        self.snapshot_interval_sec = max(0.1, float(snapshot_interval_sec or 1.0))
+        self.rotate_bytes = max(64 * 1024, int(rotate_bytes or (5 * 1024 * 1024)))
+        self.stop_event = threading.Event()
+        self.thread: Optional[threading.Thread] = None
+        self.queue: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=16384)
+        self.last_error: Optional[str] = None
+
+        self._current_path: Optional[Path] = None
+        self._current_start_ts_ms: Optional[int] = None
+        self._current_seq: int = 0
+        self._bytes_written: int = 0
+        self._last_snap_for_events: Optional[Dict[str, Any]] = None
+
+    def start(self) -> None:
+        if not self.enabled:
+            return
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        self.state.log_event.set()
+        if self.thread:
+            self.thread.join(timeout=2)
+
+    def enqueue(self, record: Dict[str, Any]) -> None:
+        if not self.enabled:
+            return
+        try:
+            self.queue.put_nowait(record)
+        except queue.Full:
+            self.last_error = "full log queue overflow"
+
+    def enqueue_snapshot(self, snap: Dict[str, Any], ts_ms: Optional[int] = None) -> None:
+        self.enqueue(
+            make_full_log_record(
+                record_type="snapshot",
+                ts_ms=int(ts_ms or _epoch_ms()),
+                source=self._source(),
+                data=snap,
+            )
+        )
+
+    def enqueue_event(self, kind: str, payload: Dict[str, Any], ts_ms: Optional[int] = None) -> None:
+        self.enqueue(
+            make_full_log_record(
+                record_type="event",
+                ts_ms=int(ts_ms or _epoch_ms()),
+                source=self._source(),
+                data={"kind": str(kind), "payload": payload},
+            )
+        )
+
+    def _source(self) -> Dict[str, Any]:
+        return {
+            "vehicle": self.state.vehicle.name,
+            "vehicle_short": self.state.vehicle.short_name or derive_short_vehicle_name(self.state.vehicle.name),
+            "device_id": self.state.appcfg.upload_device_id or _default_device_id(),
+            "pid": os.getpid(),
+        }
+
+    def _segment_dir(self, ts_ms: int) -> Path:
+        dt = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
+        day = dt.strftime("%Y%m%d")
+        vehicle_short = self.state.vehicle.short_name or derive_short_vehicle_name(self.state.vehicle.name)
+        return Path(self.base_dir).expanduser() / vehicle_short / day
+
+    def _maybe_rotate(self, ts_ms: int) -> None:
+        seg_dir = self._segment_dir(ts_ms)
+        if self._current_path is None or self._current_start_ts_ms is None:
+            self._current_start_ts_ms = ts_ms
+            self._current_seq = 0
+            seg_dir.mkdir(parents=True, exist_ok=True)
+            self._current_path = seg_dir / f"segment_{self._current_start_ts_ms}_{self._current_seq}.jsonl"
+            try:
+                self._bytes_written = self._current_path.stat().st_size if self._current_path.exists() else 0
+            except Exception:
+                self._bytes_written = 0
+            return
+
+        # Day rollover
+        try:
+            if self._current_path.parent != seg_dir:
+                self._current_start_ts_ms = ts_ms
+                self._current_seq = 0
+                seg_dir.mkdir(parents=True, exist_ok=True)
+                self._current_path = seg_dir / f"segment_{self._current_start_ts_ms}_{self._current_seq}.jsonl"
+                self._bytes_written = self._current_path.stat().st_size if self._current_path.exists() else 0
+                return
+        except Exception:
+            pass
+
+        # Size rotation
+        if self._bytes_written >= self.rotate_bytes:
+            self._current_seq += 1
+            seg_dir.mkdir(parents=True, exist_ok=True)
+            self._current_path = seg_dir / f"segment_{self._current_start_ts_ms}_{self._current_seq}.jsonl"
+            try:
+                self._bytes_written = self._current_path.stat().st_size if self._current_path.exists() else 0
+            except Exception:
+                self._bytes_written = 0
+
+    def _write_one(self, rec: Dict[str, Any]) -> None:
+        ts_ms = int(rec.get("ts_ms") or _epoch_ms())
+        self._maybe_rotate(ts_ms)
+        if self._current_path is None:
+            return
+        line = (jsonlib.dumps(rec, ensure_ascii=False) + "\n").encode("utf-8")
+        try:
+            self._current_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._current_path.open("ab") as fh:
+                fh.write(line)
+            self._bytes_written += len(line)
+        except Exception as e:
+            self.last_error = f"full log write failed: {e}"
+
+    def _derive_events(self, prev: Dict[str, Any], cur: Dict[str, Any], ts_ms: int) -> None:
+        # Modbus enabled toggle
+        try:
+            prev_en = bool(((prev.get("modbus") or {}) or {}).get("enabled"))
+            cur_en = bool(((cur.get("modbus") or {}) or {}).get("enabled"))
+            if prev_en != cur_en:
+                self.enqueue_event("modbus_enabled", {"enabled": cur_en}, ts_ms=ts_ms)
+        except Exception:
+            pass
+
+        # Controller status and point changes
+        prev_ctrls = prev.get("controllers", {}) or {}
+        cur_ctrls = cur.get("controllers", {}) or {}
+        for ctrl_name, cur_ctrl in cur_ctrls.items():
+            prev_ctrl = prev_ctrls.get(ctrl_name, {}) or {}
+            if (prev_ctrl.get("status") or None) != (cur_ctrl.get("status") or None):
+                self.enqueue_event(
+                    "controller_status",
+                    {"controller": ctrl_name, "from": prev_ctrl.get("status"), "to": cur_ctrl.get("status")},
+                    ts_ms=ts_ms,
+                )
+            prev_points = (prev_ctrl.get("points", {}) or {}) if isinstance(prev_ctrl, dict) else {}
+            cur_points = (cur_ctrl.get("points", {}) or {}) if isinstance(cur_ctrl, dict) else {}
+            for ref, cur_val in (cur_points or {}).items():
+                prev_val = (prev_points or {}).get(ref)
+                if prev_val != cur_val:
+                    self.enqueue_event(
+                        "modbus_point",
+                        {"controller": ctrl_name, "ref": ref, "from": prev_val, "to": cur_val},
+                        ts_ms=ts_ms,
+                    )
+
+        # WiFi BSSID changes
+        try:
+            prev_wifi = prev.get("wifi") or {}
+            cur_wifi = cur.get("wifi") or {}
+            if isinstance(prev_wifi, dict) and isinstance(cur_wifi, dict):
+                if (prev_wifi.get("bssid") or None) != (cur_wifi.get("bssid") or None):
+                    self.enqueue_event(
+                        "wifi_bssid",
+                        {"from": prev_wifi.get("bssid"), "to": cur_wifi.get("bssid"), "channel": cur_wifi.get("channel")},
+                        ts_ms=ts_ms,
+                    )
+        except Exception:
+            pass
+
+        # GNSS fix label changes
+        try:
+            prev_g = prev.get("gnss") or {}
+            cur_g = cur.get("gnss") or {}
+            if isinstance(prev_g, dict) and isinstance(cur_g, dict):
+                if (prev_g.get("fix") or None) != (cur_g.get("fix") or None):
+                    self.enqueue_event("gnss_fix", {"from": prev_g.get("fix"), "to": cur_g.get("fix")}, ts_ms=ts_ms)
+        except Exception:
+            pass
+
+    def _loop(self) -> None:
+        self.enqueue_event("lifecycle", {"event": "startup"})
+        next_snapshot_deadline = time.monotonic()
+        while not self.stop_event.is_set():
+            now = time.monotonic()
+            if now >= next_snapshot_deadline:
+                ts_ms = _epoch_ms()
+                snap = self.state.snapshot()
+                self.enqueue_snapshot(snap, ts_ms=ts_ms)
+                self._last_snap_for_events = snap
+                next_snapshot_deadline = now + self.snapshot_interval_sec
+
+            try:
+                triggered = self.state.log_event.wait(timeout=0.2)
+            finally:
+                self.state.log_event.clear()
+            if triggered:
+                ts_ms = _epoch_ms()
+                cur = self.state.snapshot()
+                prev = self._last_snap_for_events
+                if isinstance(prev, dict):
+                    self._derive_events(prev, cur, ts_ms)
+                self._last_snap_for_events = cur
+
+            while True:
+                try:
+                    item = self.queue.get_nowait()
+                except queue.Empty:
+                    break
+                self._write_one(item)
+
+        self.enqueue_event("lifecycle", {"event": "shutdown"})
+        while True:
+            try:
+                item = self.queue.get_nowait()
+            except queue.Empty:
+                break
+            self._write_one(item)
+
+
+class HttpLogUploader:
+    """
+    Chunked, resumable HTTP uploader for full-fidelity logs.
+
+    - Uploads newline-aligned byte ranges from segment files under `base_dir`.
+    - Persists per-file byte offsets in `state_file` so it can resume on restart.
+    """
+
+    def __init__(
+        self,
+        *,
+        enabled: bool,
+        base_dir: str,
+        url: Optional[str],
+        device_id: Optional[str],
+        chunk_bytes: int,
+        state_file: str,
+        vehicle: str,
+        vehicle_short: str,
+    ):
+        self.enabled = bool(enabled)
+        self.base_dir = str(base_dir or "logs/full")
+        self.url = str(url).strip() if url else None
+        self.device_id = str(device_id).strip() if device_id else _default_device_id()
+        self.chunk_bytes = max(16 * 1024, int(chunk_bytes or (256 * 1024)))
+        self.state_file = Path(state_file or "logs/upload_state.json").expanduser()
+        self.vehicle = str(vehicle or "")
+        self.vehicle_short = str(vehicle_short or "")
+        self.stop_event = threading.Event()
+        self.thread: Optional[threading.Thread] = None
+        self.last_error: Optional[str] = None
+        self._lock = threading.Lock()
+        self._state: Dict[str, Any] = {"v": 1, "files": {}}
+
+    def start(self) -> None:
+        if not self.enabled or not self.url:
+            return
+        self._load_state()
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        if self.thread:
+            self.thread.join(timeout=2)
+        self._save_state()
+
+    def _load_state(self) -> None:
+        try:
+            if self.state_file.exists():
+                raw = json.loads(self.state_file.read_text(encoding="utf-8"))
+                if isinstance(raw, dict) and isinstance(raw.get("files"), dict):
+                    self._state = raw
+        except Exception:
+            # ignore corrupt state
+            pass
+
+    def _save_state(self) -> None:
+        try:
+            self.state_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.state_file.with_suffix(self.state_file.suffix + ".tmp")
+            tmp.write_text(json.dumps(self._state, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(self.state_file)
+        except Exception:
+            pass
+
+    def _list_segments(self) -> List[Path]:
+        base = Path(self.base_dir).expanduser()
+        if not base.exists():
+            return []
+        # Only upload JSONL segments, never wifilogs.
+        return sorted(base.rglob("segment_*.jsonl"), key=lambda p: (str(p.parent), p.name))
+
+    def _get_offset(self, path: Path) -> int:
+        with self._lock:
+            files = self._state.setdefault("files", {})
+            try:
+                return int(files.get(str(path), 0))
+            except Exception:
+                return 0
+
+    def _set_offset(self, path: Path, offset: int) -> None:
+        with self._lock:
+            files = self._state.setdefault("files", {})
+            files[str(path)] = int(max(0, offset))
+
+    def _read_chunk_newline_aligned(self, path: Path, start: int) -> Tuple[bytes, int]:
+        """
+        Returns (payload_bytes, end_offset_exclusive).
+        End offset is advanced to the end of a line (newline included) when possible.
+        """
+        st = path.stat()
+        size = int(st.st_size)
+        if start >= size:
+            return b"", start
+        end_target = min(size, start + self.chunk_bytes)
+        with path.open("rb") as fh:
+            fh.seek(start)
+            data = fh.read(end_target - start)
+            if not data:
+                return b"", start
+            end = start + len(data)
+            if end < size and not data.endswith(b"\n"):
+                # Extend to the next newline, with a small cap to avoid huge lines.
+                extra = fh.read(64 * 1024)
+                if extra:
+                    nl = extra.find(b"\n")
+                    if nl >= 0:
+                        data += extra[: nl + 1]
+                        end += nl + 1
+        return data, end
+
+    def _post_chunk(self, segment: Path, start: int, end: int, payload: bytes) -> None:
+        assert self.url is not None
+        req = urllib.request.Request(self.url, method="POST", data=payload)
+        req.add_header("Content-Type", "application/x-ndjson")
+        req.add_header("X-Schema-Version", str(FULL_LOG_SCHEMA_VERSION))
+        req.add_header("X-Device-Id", self.device_id)
+        req.add_header("X-Vehicle", self.vehicle)
+        req.add_header("X-Vehicle-Short", self.vehicle_short)
+        req.add_header("X-Log-Segment", segment.name)
+        req.add_header("X-Chunk-Start", str(start))
+        req.add_header("X-Chunk-End", str(end))
+        req.add_header("X-Chunk-Bytes", str(len(payload)))
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            code = int(getattr(resp, "status", 200))
+            if code < 200 or code >= 300:
+                raise RuntimeError(f"upload failed: HTTP {code}")
+
+    def _loop(self) -> None:
+        backoff = 0.5
+        while not self.stop_event.is_set():
+            try:
+                did_work = False
+                for p in self._list_segments():
+                    if self.stop_event.is_set():
+                        break
+                    try:
+                        off = self._get_offset(p)
+                        payload, end = self._read_chunk_newline_aligned(p, off)
+                        if not payload:
+                            continue
+                        self._post_chunk(p, off, end, payload)
+                        self._set_offset(p, end)
+                        did_work = True
+                        backoff = 0.5
+                        # Persist progress frequently so crashes don't re-upload too much.
+                        self._save_state()
+                    except (OSError, urllib.error.URLError, urllib.error.HTTPError, RuntimeError) as e:
+                        self.last_error = str(e)
+                        break
+                if not did_work:
+                    if self.stop_event.wait(1.0):
+                        break
+            except Exception as e:
+                self.last_error = str(e)
+            # Backoff on errors
+            if self.last_error:
+                if self.stop_event.wait(backoff):
+                    break
+                backoff = min(backoff * 2.0, 30.0)
 
 
 class DetailedWifiLogger:
@@ -796,6 +1220,37 @@ def load_config(path: str) -> AppCfg:
     logging_cfg = raw.get("logging", {}) or {}
     app_log_file = logging_cfg.get("appLogFile") or logging_cfg.get("app_log_file") or None
     app_log_level = logging_cfg.get("appLogLevel") or logging_cfg.get("app_log_level") or logging_cfg.get("level") or None
+    full_cfg = logging_cfg.get("full") or logging_cfg.get("fullLog") or {}
+    if not isinstance(full_cfg, dict):
+        full_cfg = {}
+    upload_cfg = raw.get("upload", {}) or {}
+    if not isinstance(upload_cfg, dict):
+        upload_cfg = {}
+
+    def _as_bool(x: Any, default: bool = False) -> bool:
+        if x is None:
+            return bool(default)
+        if isinstance(x, bool):
+            return x
+        s = str(x).strip().lower()
+        if s in ("1", "true", "yes", "y", "on"):
+            return True
+        if s in ("0", "false", "no", "n", "off"):
+            return False
+        return bool(default)
+
+    def _as_int(x: Any, default: int) -> int:
+        try:
+            return int(x)
+        except Exception:
+            return int(default)
+
+    def _as_float(x: Any, default: float) -> float:
+        try:
+            return float(x)
+        except Exception:
+            return float(default)
+
     return AppCfg(
         port=modbus_port,
         timeout=timeout,
@@ -808,6 +1263,15 @@ def load_config(path: str) -> AppCfg:
         detailed_wifi_log_file=str(wifi_cfg.get("detailedLogFile")).strip() if wifi_cfg.get("detailedLogFile") else None,
         app_log_file=str(app_log_file).strip() if app_log_file else None,
         app_log_level=str(app_log_level).strip() if app_log_level else None,
+        full_log_enabled=_as_bool(full_cfg.get("enabled"), False),
+        full_log_dir=str(full_cfg.get("dir") or full_cfg.get("baseDir") or "logs/full"),
+        full_log_snapshot_interval_sec=_as_float(full_cfg.get("snapshotIntervalSec"), 1.0),
+        full_log_rotate_bytes=_as_int(full_cfg.get("rotateBytes"), 5 * 1024 * 1024),
+        upload_enabled=_as_bool(upload_cfg.get("enabled"), False),
+        upload_url=str(upload_cfg.get("url")).strip() if upload_cfg.get("url") else None,
+        upload_device_id=str(upload_cfg.get("deviceId") or upload_cfg.get("device_id")).strip() if (upload_cfg.get("deviceId") or upload_cfg.get("device_id")) else None,
+        upload_chunk_bytes=_as_int(upload_cfg.get("chunkBytes") or upload_cfg.get("chunk_bytes"), 256 * 1024),
+        upload_state_file=str(upload_cfg.get("stateFile") or upload_cfg.get("state_file") or "logs/upload_state.json"),
         display_latency_hosts=latency_hosts,
         vehicles=vehicles,
     )
@@ -818,7 +1282,12 @@ def write_default_config(path: str) -> None:
         "pymodbus": {"port": DEFAULT_MODBUS_PORT, "timeout": DEFAULT_TIMEOUT, "unitCandidates": DEFAULT_UNIT_CANDIDATES, "coilsFallback": DEFAULT_COILS_FALLBACK},
         "gnss": {"host": "192.168.1.50", "port": 2947},
         "wifi": {"interface": "wlp2s0", "refreshSeconds": 2, "detailedLogFile": "wifilogs"},
-        "logging": {"appLogFile": "logs/app.log", "appLogLevel": "WARNING"},
+        "logging": {
+            "appLogFile": "logs/app.log",
+            "appLogLevel": "WARNING",
+            "full": {"enabled": True, "dir": "logs/full", "snapshotIntervalSec": 1.0, "rotateBytes": 5242880},
+        },
+        "upload": {"enabled": False, "url": "http://collector:9000/ingest", "deviceId": "device-001", "chunkBytes": 262144, "stateFile": "logs/upload_state.json"},
         "display": {"latencyHosts": [{"name": "gateway", "host": "192.168.1.1"}]},
         "vehicles": [
             {

@@ -165,6 +165,15 @@ def build_daemon_parser() -> argparse.ArgumentParser:
     ap.add_argument("--app-log-level", type=str, default=None, help="Application log level (DEBUG/INFO/WARNING/ERROR)")
     ap.add_argument("--log-file", type=str, default=None)
     ap.add_argument("--log-interval", type=float, default=None)
+    ap.add_argument("--full-log", action="store_true", help="Enable full-fidelity always-on JSONL logging (segmented)")
+    ap.add_argument("--full-log-dir", type=str, default=None, help="Base directory for full logs (default from config or logs/full)")
+    ap.add_argument("--full-log-interval", type=float, default=None, help="Full snapshot interval seconds (default from config)")
+    ap.add_argument("--full-log-rotate-bytes", type=int, default=None, help="Rotate full log segments after N bytes")
+    ap.add_argument("--upload", action="store_true", help="Enable HTTP upload of full logs (chunked/resumable)")
+    ap.add_argument("--upload-url", type=str, default=None, help="HTTP endpoint URL for uploading log chunks")
+    ap.add_argument("--upload-device-id", type=str, default=None, help="Device identifier to include in upload headers")
+    ap.add_argument("--upload-chunk-bytes", type=int, default=None, help="Upload chunk size in bytes")
+    ap.add_argument("--upload-state-file", type=str, default=None, help="Path to upload cursor state JSON")
     ap.add_argument("--ipc-bind", type=str, default="127.0.0.1")
     ap.add_argument("--ipc-port", type=int, default=9102)
     return ap
@@ -174,6 +183,8 @@ def run_daemon(args: argparse.Namespace) -> int:
     from daemon_services import (
         AppState,
         DataLogger,
+        FullFidelityLogger,
+        HttpLogUploader,
         IOBridgeEvaluator,
         Poller,
         WebServer,
@@ -214,6 +225,39 @@ def run_daemon(args: argparse.Namespace) -> int:
     poller.start()
     datalogger = DataLogger(state, vehicle, args.log_file, args.log_interval)
     datalogger.start()
+
+    # Full-fidelity always-on log (segmented)
+    full_enabled = bool(appcfg.full_log_enabled) or bool(getattr(args, "full_log", False))
+    full_dir = args.full_log_dir if getattr(args, "full_log_dir", None) else appcfg.full_log_dir
+    full_interval = args.full_log_interval if getattr(args, "full_log_interval", None) is not None else appcfg.full_log_snapshot_interval_sec
+    full_rotate = args.full_log_rotate_bytes if getattr(args, "full_log_rotate_bytes", None) is not None else appcfg.full_log_rotate_bytes
+    full_logger = FullFidelityLogger(
+        state,
+        enabled=full_enabled,
+        base_dir=str(full_dir or "logs/full"),
+        snapshot_interval_sec=float(full_interval or 1.0),
+        rotate_bytes=int(full_rotate or (5 * 1024 * 1024)),
+    )
+    full_logger.start()
+
+    # HTTP upload (chunked, resumable). On startup it flushes any backlog automatically.
+    upload_enabled = bool(appcfg.upload_enabled) or bool(getattr(args, "upload", False))
+    upload_url = args.upload_url if getattr(args, "upload_url", None) else appcfg.upload_url
+    upload_device_id = args.upload_device_id if getattr(args, "upload_device_id", None) else appcfg.upload_device_id
+    upload_chunk_bytes = args.upload_chunk_bytes if getattr(args, "upload_chunk_bytes", None) is not None else appcfg.upload_chunk_bytes
+    upload_state_file = args.upload_state_file if getattr(args, "upload_state_file", None) else appcfg.upload_state_file
+    uploader = HttpLogUploader(
+        enabled=upload_enabled,
+        base_dir=str(full_dir or "logs/full"),
+        url=upload_url,
+        device_id=upload_device_id,
+        chunk_bytes=int(upload_chunk_bytes or (256 * 1024)),
+        state_file=str(upload_state_file or "logs/upload_state.json"),
+        vehicle=vehicle.name,
+        vehicle_short=getattr(vehicle, "short_name", None) or "",
+    )
+    uploader.start()
+
     web_server = WebServer(state, args.http_bind, args.http_port, broadcast_interval=args.poll, poller=poller) if args.http else None
     if web_server:
         web_server.start()
@@ -230,6 +274,8 @@ def run_daemon(args: argparse.Namespace) -> int:
         ipc_server.stop()
         if web_server:
             web_server.stop()
+        uploader.stop()
+        full_logger.stop()
         datalogger.stop()
         poller.stop()
     return 0
