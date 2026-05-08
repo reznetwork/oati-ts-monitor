@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import json
 import json as jsonlib
 import logging
@@ -44,6 +45,76 @@ TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 RECONNECT_WINDOW_SEC = 30.0
 RECONNECT_MAX_PER_WINDOW = 3
 
+# Per-controller connect() spam guard (protects controller's 12-session hard limit)
+CLIENT_CONNECT_WINDOW_SEC = 60.0
+CLIENT_CONNECT_MAX_PER_WINDOW = 5
+
+
+class ConnectionGuard:
+    """
+    Prevent controller session exhaustion caused by fast reconnect loops.
+
+    In addition to the existing Poller-level rebuild limiter, this guard rate-limits
+    low-level TCP connect attempts per controller host.
+    """
+
+    def __init__(
+        self,
+        *,
+        host: str,
+        modbus_port: int,
+        window_sec: float = CLIENT_CONNECT_WINDOW_SEC,
+        max_per_window: int = CLIENT_CONNECT_MAX_PER_WINDOW,
+        http_port: int = 80,
+        http_probe_timeout: float = 0.8,
+    ):
+        self.host = host
+        self.modbus_port = int(modbus_port)
+        self.window_sec = float(window_sec)
+        self.max_per_window = int(max_per_window)
+        self.http_port = int(http_port)
+        self.http_probe_timeout = float(http_probe_timeout)
+        self._connect_times: deque = deque()
+
+    def allow_connect(self) -> bool:
+        now = time.monotonic()
+        cutoff = now - self.window_sec
+        while self._connect_times and self._connect_times[0] < cutoff:
+            self._connect_times.popleft()
+        if len(self._connect_times) >= self.max_per_window:
+            return False
+        self._connect_times.append(now)
+        return True
+
+    def log_connect_failure(self, logger: logging.Logger, detail: str) -> None:
+        """
+        If the controller's HTTP UI is reachable while Modbus connect fails, emit a WARNING
+        (common cause: session limit reached while web UI is open). Otherwise emit ERROR.
+        """
+
+        try:
+            ok_http, _lat_ms, _why = check_tcp(self.host, self.http_port, self.http_probe_timeout)
+        except Exception:
+            ok_http = False
+
+        if ok_http:
+            logger.warning(
+                "Modbus connect failed to %s:%s (%s) while HTTP %s:%s is reachable; "
+                "controller session limit may be exhausted (web UI open?)",
+                self.host,
+                self.modbus_port,
+                detail,
+                self.host,
+                self.http_port,
+            )
+        else:
+            logger.error(
+                "Modbus connect failed to %s:%s (%s)",
+                self.host,
+                self.modbus_port,
+                detail,
+            )
+
 
 @dataclass
 class PointCfg:
@@ -74,6 +145,32 @@ class VehicleCfg:
     gnss_port: Optional[int] = None
     gnss_admin_host: Optional[str] = None
     gnss_admin_port: Optional[int] = None
+    bridge_mappings: List[BridgeMappingCfg] = field(default_factory=list)
+
+
+@dataclass
+class BridgeInput:
+    controller: str
+    ref: int
+    source_type: str = "di"
+    name: Optional[str] = None
+
+
+@dataclass
+class BridgeOutput:
+    controller: str
+    address: int
+
+
+@dataclass
+class BridgeMappingCfg:
+    name: str
+    inputs: List[BridgeInput]
+    output: BridgeOutput
+    logic: Optional[str] = None
+    invert: bool = False
+    debounce_ms: int = 0
+    on_error: str = "hold"  # hold | force_off | force_on
 
 
 def derive_short_vehicle_name(name: str) -> str:
@@ -623,6 +720,58 @@ def load_config(path: str) -> AppCfg:
                     model=c.get("model"),
                 )
             )
+        bridge_mappings: List[BridgeMappingCfg] = []
+        bridge_raw = v.get("bridge", {}) or {}
+        for m in (bridge_raw.get("mappings", []) or []):
+            try:
+                name = str(m.get("name") or "mapping")
+                on_error = str(m.get("on_error") or m.get("onError") or "hold").lower()
+                invert = bool(m.get("invert", False))
+                debounce_ms = int(m.get("debounce_ms") or m.get("debounceMs") or 0)
+                logic = m.get("logic")
+                if logic is not None:
+                    logic = str(logic)
+
+                raw_inputs = None
+                if "inputs" in m and m.get("inputs") is not None:
+                    raw_inputs = m.get("inputs") or []
+                elif "input" in m and m.get("input") is not None:
+                    raw_inputs = [m.get("input")]
+                else:
+                    raw_inputs = []
+
+                inputs: List[BridgeInput] = []
+                for idx, inp in enumerate(raw_inputs):
+                    if not isinstance(inp, dict):
+                        continue
+                    inputs.append(
+                        BridgeInput(
+                            controller=str(inp.get("controller") or inp.get("device") or ""),
+                            ref=int(inp.get("ref")),
+                            source_type=str(inp.get("source_type") or inp.get("sourceType") or "di"),
+                            name=str(inp.get("name")) if inp.get("name") is not None else None,
+                        )
+                    )
+                out_raw = m.get("output") or {}
+                output = BridgeOutput(
+                    controller=str(out_raw.get("controller") or out_raw.get("device") or ""),
+                    address=int(out_raw.get("address")),
+                )
+                if not inputs or not output.controller:
+                    continue
+                bridge_mappings.append(
+                    BridgeMappingCfg(
+                        name=name,
+                        inputs=inputs,
+                        output=output,
+                        logic=logic,
+                        invert=invert,
+                        debounce_ms=debounce_ms,
+                        on_error=on_error,
+                    )
+                )
+            except Exception:
+                continue
         vehicles.append(
             VehicleCfg(
                 name=v_name,
@@ -633,6 +782,7 @@ def load_config(path: str) -> AppCfg:
                 gnss_port=int(v_gnss_port) if v_gnss_port is not None else None,
                 gnss_admin_host=str(v_gnss.get("adminHost")) if v_gnss.get("adminHost") else None,
                 gnss_admin_port=int(v_admin_port) if v_admin_port is not None else None,
+                bridge_mappings=bridge_mappings,
             )
         )
     wifi_refresh_raw = wifi_cfg.get("refreshSeconds")
@@ -751,6 +901,138 @@ def logical_state(invert: bool, raw: Optional[bool]) -> Optional[bool]:
     if raw is None:
         return None
     return (not raw) if invert else raw
+
+
+def _evaluate_expression(expr: str, values: Dict[str, bool]) -> bool:
+    """
+    Evaluate a simple boolean expression using provided values.
+    Supports AND/OR/NOT and XOR (using ^) operators.
+    """
+
+    def _eval(node: ast.AST) -> bool:
+        if isinstance(node, ast.Expression):
+            return _eval(node.body)
+        if isinstance(node, ast.BoolOp):
+            vals = [_eval(v) for v in node.values]
+            if isinstance(node.op, ast.And):
+                return all(vals)
+            if isinstance(node.op, ast.Or):
+                return any(vals)
+            raise ValueError("Only AND/OR boolean operators are supported")
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitXor):
+            return _eval(node.left) ^ _eval(node.right)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            return not _eval(node.operand)
+        if isinstance(node, ast.Name):
+            if node.id not in values:
+                raise ValueError(f"Unknown variable '{node.id}' in logic expression")
+            return bool(values[node.id])
+        if isinstance(node, ast.Constant) and isinstance(node.value, bool):
+            return bool(node.value)
+        raise ValueError("Unsupported expression; use AND, OR, NOT, XOR (^), and parentheses")
+
+    parsed = ast.parse(expr, mode="eval")
+    return bool(_eval(parsed))
+
+
+class IOBridgeEvaluator:
+    def __init__(self, mappings: List[BridgeMappingCfg]):
+        self.mappings = list(mappings or [])
+        self._last_written: Dict[str, Optional[bool]] = {m.name: None for m in self.mappings}
+        self._candidate_state: Dict[str, Optional[bool]] = {m.name: None for m in self.mappings}
+        self._candidate_since: Dict[str, Optional[float]] = {m.name: None for m in self.mappings}
+        self._logger = logging.getLogger("io_bridge")
+
+    def extra_refs_for(self, controller_name: str) -> List[int]:
+        refs: List[int] = []
+        for m in self.mappings:
+            for inp in m.inputs:
+                if inp.controller == controller_name:
+                    refs.append(int(inp.ref))
+        return refs
+
+    def evaluate(
+        self,
+        ref_values: Dict[str, Dict[int, Optional[bool]]],
+        clients: Dict[str, MBClient],
+    ) -> None:
+        now = time.monotonic()
+        for m in self.mappings:
+            desired = self._compute_desired(m, ref_values)
+            debounce_s = max(0.0, float(m.debounce_ms or 0) / 1000.0)
+
+            if debounce_s <= 0:
+                self._maybe_write(m, desired, clients)
+                continue
+
+            cand = self._candidate_state.get(m.name)
+            since = self._candidate_since.get(m.name)
+            if cand is None or cand != desired:
+                self._candidate_state[m.name] = desired
+                self._candidate_since[m.name] = now
+                continue
+
+            if since is not None and (now - since) >= debounce_s:
+                self._maybe_write(m, desired, clients)
+
+    def _compute_desired(
+        self,
+        m: BridgeMappingCfg,
+        ref_values: Dict[str, Dict[int, Optional[bool]]],
+    ) -> Optional[bool]:
+        vals: Dict[str, bool] = {}
+        for idx, inp in enumerate(m.inputs):
+            per_ctrl = ref_values.get(inp.controller) or {}
+            raw = per_ctrl.get(int(inp.ref))
+            if raw is None:
+                return self._on_error_value(m.on_error)
+            name = inp.name or f"in{idx+1}"
+            vals[name] = bool(raw)
+
+        try:
+            if m.logic:
+                out = _evaluate_expression(m.logic, vals)
+            else:
+                if len(vals) != 1:
+                    raise ValueError(f"mapping '{m.name}' requires logic for multiple inputs")
+                out = next(iter(vals.values()))
+        except Exception as e:
+            self._logger.warning("Bridge mapping '%s' logic error: %s", m.name, e)
+            return self._on_error_value(m.on_error)
+
+        out = (not out) if m.invert else out
+        return bool(out)
+
+    def _on_error_value(self, on_error: str) -> Optional[bool]:
+        mode = str(on_error or "hold").lower()
+        if mode == "force_off":
+            return False
+        if mode == "force_on":
+            return True
+        return None  # hold
+
+    def _maybe_write(self, m: BridgeMappingCfg, desired: Optional[bool], clients: Dict[str, MBClient]) -> None:
+        if desired is None:
+            return
+        last = self._last_written.get(m.name)
+        if last is not None and last == desired:
+            return
+        client = clients.get(m.output.controller)
+        if client is None:
+            self._logger.warning("Bridge mapping '%s' output controller not found: %s", m.name, m.output.controller)
+            return
+        ok = client.write_coil(int(m.output.address), bool(desired))
+        if ok:
+            self._last_written[m.name] = bool(desired)
+        else:
+            self._logger.warning(
+                "Bridge mapping '%s' coil write failed (%s:%s desired=%s): %s",
+                m.name,
+                m.output.controller,
+                m.output.address,
+                int(bool(desired)),
+                client.last_error,
+            )
 
 
 def check_tcp(host: str, port: int, timeout: float) -> Tuple[bool, Optional[float], Optional[str]]:
@@ -1001,8 +1283,33 @@ def call_bits(method, address: int, count: int, unit: int):
         return None, f"call error: {e.__class__.__name__}: {e}"
 
 
+def call_write_coil(method, address: int, value: bool, unit: int):
+    try:
+        return method(address, value=value, slave=unit), None
+    except TypeError as e1:
+        try:
+            return method(address, value=value, unit=unit), None
+        except TypeError as e2:
+            try:
+                return method(address, value=value), None
+            except Exception as e3:
+                return None, f"kw variants failed: slave({e1}); unit({e2}); no-unit({e3.__class__.__name__}: {e3})"
+    except Exception as e:
+        return None, f"call error: {e.__class__.__name__}: {e}"
+
+
 class MBClient:
-    def __init__(self, host: str, port: int, timeout: float, unit_candidates: List[int], use_coils_fallback: bool):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        timeout: float,
+        unit_candidates: List[int],
+        use_coils_fallback: bool,
+        *,
+        guard: Optional[ConnectionGuard] = None,
+        logger: Optional[logging.Logger] = None,
+    ):
         if ModbusTcpClient is None:
             raise RuntimeError("pymodbus is required to run Modbus polling")
         self.host = host
@@ -1015,16 +1322,32 @@ class MBClient:
         self.unit: Optional[int] = None
         self.func: str = "di"
         self.last_error: Optional[str] = None
+        self.guard = guard or ConnectionGuard(host=str(host), modbus_port=int(port))
+        self.logger = logger or logging.getLogger("modbus")
 
     def connect(self) -> bool:
+        if not self.guard.allow_connect():
+            self.last_error = (
+                f"connect rate-limited ({self.guard.max_per_window} per {int(self.guard.window_sec)}s)"
+            )
+            self.logger.warning(
+                "Modbus connect rate-limited for %s:%s (%s)",
+                self.host,
+                self.port,
+                self.last_error,
+            )
+            self.connected = False
+            return False
         try:
             self.connected = self.client.connect()
             if not self.connected:
                 self.last_error = "connect() failed"
+                self.guard.log_connect_failure(self.logger, self.last_error)
             return self.connected
         except Exception as e:
             self.connected = False
             self.last_error = f"connect error: {e.__class__.__name__}: {e}"
+            self.guard.log_connect_failure(self.logger, self.last_error)
             return False
 
     def ensure_connected(self) -> bool:
@@ -1097,6 +1420,25 @@ class MBClient:
             if 0 <= idx < len(bits):
                 out[ref] = bool(bits[idx])
         return out
+
+    def write_coil(self, address: int, value: bool) -> bool:
+        if not self.ensure_connected():
+            return False
+        if self.unit is None:
+            # Probe didn't run yet. Default to the first candidate.
+            self.unit = self.unit_candidates[0] if self.unit_candidates else 1
+        try:
+            rq, err = call_write_coil(self.client.write_coil, int(address), bool(value), int(self.unit))
+            if rq is None:
+                self.last_error = err or "unknown write error"
+                return False
+            if hasattr(rq, "isError") and rq.isError():  # type: ignore
+                self.last_error = "server returned error"
+                return False
+            return True
+        except Exception as e:
+            self.last_error = f"coil write exception: {e.__class__.__name__}: {e}"
+            return False
 
 
 def _nmea_to_deg(raw: str, direction: str) -> Optional[float]:
@@ -1199,11 +1541,20 @@ class GNSSClient:
 
 
 class Poller:
-    def __init__(self, args, appcfg: AppCfg, vehicle: VehicleCfg, state: AppState):
+    def __init__(
+        self,
+        args,
+        appcfg: AppCfg,
+        vehicle: VehicleCfg,
+        state: AppState,
+        *,
+        bridge: Optional[IOBridgeEvaluator] = None,
+    ):
         self.args = args
         self.appcfg = appcfg
         self.vehicle = vehicle
         self.state = state
+        self.bridge = bridge
         self.stop_event = threading.Event()
         self.reconnect_event = threading.Event()
         self.clients: Dict[str, MBClient] = {}
@@ -1322,7 +1673,15 @@ class Poller:
         self.status = {}
         self.debug_msgs = {}
         for cfg in self.vehicle.controllers:
-            self.clients[cfg.name] = MBClient(cfg.host, self.args.port, self.args.timeout, self.args.unit_candidates, self.args.coils)
+            self.clients[cfg.name] = MBClient(
+                cfg.host,
+                self.args.port,
+                self.args.timeout,
+                self.args.unit_candidates,
+                self.args.coils,
+                guard=ConnectionGuard(host=str(cfg.host), modbus_port=int(self.args.port)),
+                logger=logging.getLogger(f"modbus.{cfg.name}"),
+            )
 
     def request_reconnect(self):
         self.reconnect_event.set()
@@ -1399,16 +1758,17 @@ class Poller:
             self._tcp_check_inflight = True
         threading.Thread(target=self._refresh_tcp_status_worker, daemon=True).start()
 
-    def poll_controller(self, cfg: ControllerCfg):
+    def poll_controller(self, cfg: ControllerCfg) -> Dict[int, Optional[bool]]:
         if not self._modbus_enabled:
             self.state.set_controller(cfg.name, status="DISABLED", debug="Modbus disabled via UI")
-            return
+            return {}
         client = self.clients[cfg.name]
         point_refs = [p.ref for p in cfg.points]
         gear_refs = sorted(cfg.gear_points.keys())
         extra_refs = sorted(cfg.extra_points.keys())
 
-        needed_refs = point_refs + gear_refs + extra_refs
+        bridge_refs = self.bridge.extra_refs_for(cfg.name) if self.bridge else []
+        needed_refs = point_refs + gear_refs + extra_refs + bridge_refs
         point_ref_set = set(point_refs)
         ref_values: Dict[int, Optional[bool]] = {}
         last_error_points: Optional[str] = None
@@ -1443,6 +1803,7 @@ class Poller:
             debug=debug,
             latency=self.latency.get(cfg.name),
         )
+        return ref_values
 
     def run_once(self):
         now = time.monotonic()
@@ -1464,8 +1825,14 @@ class Poller:
         if now - self.last_net_check_time >= self.poll_net_interval:
             self.refresh_tcp_status()
             self.last_net_check_time = now
+        bridge_snapshot: Dict[str, Dict[int, Optional[bool]]] = {}
         for cfg in self.vehicle.controllers:
-            self.poll_controller(cfg)
+            bridge_snapshot[cfg.name] = self.poll_controller(cfg)
+        if self.bridge:
+            try:
+                self.bridge.evaluate(bridge_snapshot, self.clients)
+            except Exception as e:
+                logging.getLogger("io_bridge").warning("Bridge evaluator error: %s", e)
         if now - self.last_wifi_check_time >= self.wifi_refresh_interval and self.appcfg.wifi_iface:
             wifi = get_wifi_status(self.appcfg.wifi_iface)
             ts_ms = int(time.time() * 1000)

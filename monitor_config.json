@@ -102,7 +102,24 @@
             }
           ]
         }
-      ]
+      ],
+      "bridge": {
+        "mappings": [
+          {
+            "name": "handbrake_relay",
+            "input": {
+              "controller": "MB_IO_1",
+              "ref": 10005
+            },
+            "output": {
+              "controller": "MB_IO_1",
+              "address": 0
+            },
+            "debounce_ms": 300,
+            "on_error": "hold"
+          }
+        ]
+      }
     },
     {
       "name": "Дизельный погрузчик JHLIFT CPCD30NXRW10 (9595MP77)",

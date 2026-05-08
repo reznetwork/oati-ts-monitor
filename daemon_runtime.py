@@ -174,6 +174,7 @@ def run_daemon(args: argparse.Namespace) -> int:
     from daemon_services import (
         AppState,
         DataLogger,
+        IOBridgeEvaluator,
         Poller,
         WebServer,
         load_config,
@@ -208,7 +209,8 @@ def run_daemon(args: argparse.Namespace) -> int:
     app_log_level = args.app_log_level or appcfg.app_log_level or "WARNING"
     app_log_file = args.app_log_file if args.app_log_file is not None else (appcfg.app_log_file or "logs/app.log")
     setup_app_logging(state, log_file=app_log_file, level=app_log_level)
-    poller = Poller(args, appcfg, vehicle, state)
+    bridge = IOBridgeEvaluator(vehicle.bridge_mappings) if getattr(vehicle, "bridge_mappings", None) else None
+    poller = Poller(args, appcfg, vehicle, state, bridge=bridge)
     poller.start()
     datalogger = DataLogger(state, vehicle, args.log_file, args.log_interval)
     datalogger.start()
