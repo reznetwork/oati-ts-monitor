@@ -31,6 +31,12 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--json", action="store_true", help="Emit JSON instead of a table")
     ap.add_argument("--verbose", action="store_true", help="Show pymodbus diagnostics")
     ap.add_argument("--no-coils", action="store_true", help="Disable FC01 coils fallback when FC02 fails")
+    ap.add_argument(
+        "--read-mode",
+        choices=("multi", "single"),
+        default="multi",
+        help="Read passthrough values as one range request or as one query per address (default: multi)",
+    )
     return ap
 
 
@@ -91,6 +97,7 @@ def _snapshot_payload(
     port: int,
     unit: int,
     func: Optional[str],
+    read_mode: str,
     vehicle_name: Optional[str],
     rows: List[Dict[str, Any]],
     error: Optional[str],
@@ -101,6 +108,7 @@ def _snapshot_payload(
         "port": port,
         "unit": unit,
         "func": func,
+        "read_mode": read_mode,
         "vehicle": vehicle_name,
         "error": error,
         "values": rows,
@@ -144,6 +152,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         coils_fallback=not args.no_coils and appcfg.coils_fallback,
         unit_candidates=appcfg.unit_candidates if args.unit is None else [unit],
         verbose=args.verbose,
+        read_mode=args.read_mode,
     )
     try:
         if not reader.connect():
@@ -174,6 +183,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     port=port,
                     unit=reader.unit,
                     func=reader.func,
+                    read_mode=reader.read_mode,
                     vehicle_name=getattr(vehicle, "name", None),
                     rows=[],
                     error=reader.last_error,
@@ -192,6 +202,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 port=port,
                 unit=reader.unit,
                 func=reader.func,
+                read_mode=reader.read_mode,
                 vehicle_name=getattr(vehicle, "name", None),
                 rows=rows,
                 error=reader.last_error if all(r["value"] is None for r in rows) else None,
@@ -216,7 +227,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(json.dumps(payload, ensure_ascii=False, indent=2))
             else:
                 if args.verbose and payload.get("func"):
-                    print(f"using unit={payload['unit']} func={payload['func']}", file=sys.stderr)
+                    print(
+                        f"using unit={payload['unit']} func={payload['func']} read_mode={payload['read_mode']}",
+                        file=sys.stderr,
+                    )
                 print(_render_table(payload["values"]))
     finally:
         reader.close()

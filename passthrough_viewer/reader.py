@@ -66,6 +66,9 @@ def _is_transient_error(err: Optional[str]) -> bool:
 
 
 class PassthroughReader:
+    READ_MODE_MULTI = "multi"
+    READ_MODE_SINGLE = "single"
+
     def __init__(
         self,
         host: str,
@@ -78,9 +81,12 @@ class PassthroughReader:
         verbose: bool = False,
         read_retries: int = 3,
         read_pause_sec: float = 0.03,
+        read_mode: str = READ_MODE_MULTI,
     ):
         if ModbusTcpClient is None:
             raise RuntimeError("pymodbus is required; install with: python3 -m pip install -r requirements.txt")
+        if read_mode not in {self.READ_MODE_MULTI, self.READ_MODE_SINGLE}:
+            raise ValueError(f"unsupported passthrough read mode: {read_mode}")
         self.host = host
         self.port = int(port)
         self.unit = int(unit)
@@ -90,6 +96,7 @@ class PassthroughReader:
         self.verbose = bool(verbose)
         self.read_retries = max(1, int(read_retries))
         self.read_pause_sec = max(0.0, float(read_pause_sec))
+        self.read_mode = read_mode
         self.client = ModbusTcpClient(host, port=self.port, timeout=self.timeout)
         self.connected = False
         self.func: Optional[str] = None
@@ -150,6 +157,27 @@ class PassthroughReader:
             break
         return None, last_err
 
+    def _read_range(self, start: int, count: int, func: str) -> Tuple[Optional[List[bool]], Optional[str]]:
+        last_err: Optional[str] = None
+        for attempt in range(self.read_retries):
+            if not self.connected and not self.connect():
+                return None, self.last_error
+            bits, err = self._read_bits(start, count, func)
+            if bits is not None:
+                return bits, None
+            last_err = err
+            if _is_transient_error(err) and attempt + 1 < self.read_retries:
+                if self.verbose:
+                    print(
+                        f"retry @{start} count={count} attempt {attempt + 2}/{self.read_retries}: {err}",
+                        flush=True,
+                    )
+                self._reconnect()
+                time.sleep(self.read_pause_sec * (attempt + 1))
+                continue
+            break
+        return None, last_err
+
     def probe(self, addresses: List[int]) -> bool:
         if not addresses:
             self.func = "di"
@@ -184,16 +212,32 @@ class PassthroughReader:
             return out
         assert self.func is not None
 
-        for addr in sorted(set(addresses)):
-            value, err = self._read_one(addr, self.func)
-            if value is not None:
-                out[addr] = value
-            elif err:
+        unique_addresses = sorted(set(addresses))
+        if self.read_mode == self.READ_MODE_SINGLE:
+            for addr in unique_addresses:
+                value, err = self._read_one(addr, self.func)
+                if value is not None:
+                    out[addr] = value
+                elif err:
+                    self.last_error = err
+                    if self.verbose:
+                        print(f"read failed @{addr}: {err}", flush=True)
+                if self.read_pause_sec:
+                    time.sleep(self.read_pause_sec)
+            return out
+
+        start = unique_addresses[0]
+        count = unique_addresses[-1] - start + 1
+        bits, err = self._read_range(start, count, self.func)
+        if bits is None:
+            if err:
                 self.last_error = err
                 if self.verbose:
-                    print(f"read failed @{addr}: {err}", flush=True)
-            if self.read_pause_sec:
-                time.sleep(self.read_pause_sec)
+                    print(f"range read failed @{start} count={count}: {err}", flush=True)
+            return out
+
+        for addr in unique_addresses:
+            out[addr] = bool(bits[addr - start])
         return out
 
     def read_entries(self, entries: List[PassthroughEntry]) -> List[Tuple[PassthroughEntry, Optional[bool]]]:
