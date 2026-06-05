@@ -1,0 +1,4 @@
+#!/bin/sh
+set -e
+export PYTHONPATH="/usr/lib/oati-ts-monitor${PYTHONPATH:+:$PYTHONPATH}"
+exec python3 /usr/lib/oati-ts-monitor/daemon.py "$@"

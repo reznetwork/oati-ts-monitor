@@ -53,12 +53,14 @@
             {
               "ref": 10005,
               "label": "Parking_break",
-              "style": "handbrake"
+              "style": "handbrake",
+              "passthrough": "handbrake"
             },
             {
               "ref": 10225,
               "label": "Ремень",
-              "style": "seatbelt"
+              "style": "seatbelt",
+              "passthrough": "seatbelt"
             }
           ],
           "gear_points": {
@@ -67,6 +69,13 @@
             "10002": "N",
             "10003": "H",
             "10004": "L"
+          },
+          "passthrough_gears": {
+            "10000": "gear:P",
+            "10001": "gear:R",
+            "10002": "gear:N",
+            "10003": "gear:H",
+            "10004": "gear:L"
           }
         },
         {
@@ -78,27 +87,32 @@
             {
               "ref": 10000,
               "label": "Левый поворотник",
-              "style": "indicator"
+              "style": "indicator",
+              "passthrough": "indicator_left"
             },
             {
               "ref": 10002,
               "label": "Правый поворотник",
-              "style": "indicator"
+              "style": "indicator",
+              "passthrough": "indicator_right"
             },
             {
               "ref": 10004,
               "label": "Ближний свет",
-              "style": "light"
+              "style": "light",
+              "passthrough": "light_low"
             },
             {
               "ref": 10009,
               "label": "Тормоз",
-              "style": "brake"
+              "style": "brake",
+              "passthrough": "brake"
             },
             {
               "ref": 10010,
               "label": "Сигнал",
-              "style": "horn"
+              "style": "horn",
+              "passthrough": "horn"
             }
           ]
         }
@@ -114,6 +128,19 @@
             "output": {
               "controller": "MB_IO_1",
               "address": 0
+            },
+            "debounce_ms": 300,
+            "on_error": "hold"
+          },
+          {
+            "name": "neutral_gear_relay",
+            "input": {
+              "controller": "MB_IO_1",
+              "ref": 10002
+            },
+            "output": {
+              "controller": "MB_IO_1",
+              "address": 1
             },
             "debounce_ms": 300,
             "on_error": "hold"
@@ -140,27 +167,32 @@
           "points": [
             {
               "ref": 10000,
-              "label": "Наклон подъемника на себя"
+              "label": "Наклон подъемника на себя",
+              "passthrough": "di:0"
             },
             {
               "ref": 10001,
               "invert": true,
-              "label": "Вилы подняты > 30см"
+              "label": "Вилы подняты > 30см",
+              "passthrough": "di:1"
             },
             {
               "ref": 10002,
               "label": "Давление масла (Зажигание?)",
-              "style": "engine"
+              "style": "engine",
+              "passthrough": "engine"
             },
             {
               "ref": 10004,
               "label": "Ремень",
-              "style": "seatbelt"
+              "style": "seatbelt",
+              "passthrough": "seatbelt"
             },
             {
               "ref": 10003,
               "label": "Звуковой сигнал",
-              "style": "horn"
+              "style": "horn",
+              "passthrough": "horn"
             }
           ]
         },
@@ -173,36 +205,76 @@
             {
               "ref": 10004,
               "label": "Ручник",
-              "style": "handbrake"
+              "style": "handbrake",
+              "passthrough": "handbrake"
             },
             {
               "ref": 10005,
               "label": "Левый поворотник",
-              "style": "indicator"
+              "style": "indicator",
+              "passthrough": "indicator_left"
             },
             {
               "ref": 10006,
               "label": "Тормоз",
-              "style": "brake"
+              "style": "brake",
+              "passthrough": "brake"
             },
             {
               "ref": 10008,
               "label": "Правый поворотник",
-              "style": "indicator"
+              "style": "indicator",
+              "passthrough": "indicator_right"
             },
             {
               "ref": 10009,
               "label": "Ближний свет",
-              "style": "light"
+              "style": "light",
+              "passthrough": "light_low"
             }
           ],
           "gear_points": {
             "10000": "F",
             "10001": "N",
             "10002": "R"
+          },
+          "passthrough_gears": {
+            "10000": "gear:F",
+            "10001": "gear:N",
+            "10002": "gear:R"
           }
         }
-      ]
+      ],
+      "bridge": {
+        "mappings": [
+          {
+            "name": "handbrake_relay",
+            "input": {
+              "controller": "MB_IO_2",
+              "ref": 10004
+            },
+            "output": {
+              "controller": "MB_IO_1",
+              "address": 0
+            },
+            "debounce_ms": 300,
+            "on_error": "hold"
+          },
+          {
+            "name": "neutral_gear_relay",
+            "input": {
+              "controller": "MB_IO_2",
+              "ref": 10001
+            },
+            "output": {
+              "controller": "MB_IO_1",
+              "address": 1
+            },
+            "debounce_ms": 300,
+            "on_error": "hold"
+          }
+        ]
+      }
     },
     {
       "name": "Дизельный погрузчик JHLIFT CPCD30NXRW10 (9596MP77)",
@@ -223,26 +295,31 @@
           "points": [
             {
               "ref": 10000,
-              "label": "Наклон подъемника на себя"
+              "label": "Наклон подъемника на себя",
+              "passthrough": "di:0"
             },
             {
               "ref": 10001,
-              "label": "Вилы подняты > 30см"
+              "label": "Вилы подняты > 30см",
+              "passthrough": "di:1"
             },
             {
               "ref": 10002,
               "label": "Давление масла (Зажигание?)",
-              "style": "engine"
+              "style": "engine",
+              "passthrough": "engine"
             },
             {
               "ref": 10004,
               "label": "Звуковой сигнал",
-              "style": "horn"
+              "style": "horn",
+              "passthrough": "horn"
             },
             {
               "ref": 10005,
               "label": "Ремень",
-              "style": "seatbelt"
+              "style": "seatbelt",
+              "passthrough": "seatbelt"
             }
           ]
         },
@@ -255,36 +332,76 @@
             {
               "ref": 10004,
               "label": "Ручник",
-              "style": "handbrake"
+              "style": "handbrake",
+              "passthrough": "handbrake"
             },
             {
               "ref": 10005,
               "label": "Левый поворотник",
-              "style": "indicator"
+              "style": "indicator",
+              "passthrough": "indicator_left"
             },
             {
               "ref": 10006,
               "label": "Тормоз",
-              "style": "brake"
+              "style": "brake",
+              "passthrough": "brake"
             },
             {
               "ref": 10008,
               "label": "Правый поворотник",
-              "style": "indicator"
+              "style": "indicator",
+              "passthrough": "indicator_right"
             },
             {
               "ref": 10009,
               "label": "Ближний свет",
-              "style": "light"
+              "style": "light",
+              "passthrough": "light_low"
             }
           ],
           "gear_points": {
             "10000": "F",
             "10001": "N",
             "10002": "R"
+          },
+          "passthrough_gears": {
+            "10000": "gear:F",
+            "10001": "gear:N",
+            "10002": "gear:R"
           }
         }
-      ]
+      ],
+      "bridge": {
+        "mappings": [
+          {
+            "name": "handbrake_relay",
+            "input": {
+              "controller": "MB_IO_2",
+              "ref": 10004
+            },
+            "output": {
+              "controller": "MB_IO_1",
+              "address": 0
+            },
+            "debounce_ms": 300,
+            "on_error": "hold"
+          },
+          {
+            "name": "neutral_gear_relay",
+            "input": {
+              "controller": "MB_IO_2",
+              "ref": 10001
+            },
+            "output": {
+              "controller": "MB_IO_1",
+              "address": 1
+            },
+            "debounce_ms": 300,
+            "on_error": "hold"
+          }
+        ]
+      }
     },
     {
       "name": "Квадроцикл CFMOTO CFORCE 600",
@@ -308,6 +425,13 @@
             "10002": "N",
             "10003": "H",
             "10004": "L"
+          },
+          "passthrough_gears": {
+            "10000": "gear:P",
+            "10001": "gear:R",
+            "10002": "gear:N",
+            "10003": "gear:H",
+            "10004": "gear:L"
           }
         },
         {
@@ -319,36 +443,59 @@
             {
               "ref": 10000,
               "label": "Левый поворотник",
-              "style": "indicator"
+              "style": "indicator",
+              "passthrough": "indicator_left"
             },
             {
               "ref": 10002,
               "label": "Правый поворотник",
-              "style": "indicator"
+              "style": "indicator",
+              "passthrough": "indicator_right"
             },
             {
               "ref": 10004,
               "label": "Дальний свет",
-              "style": "light"
+              "style": "light",
+              "passthrough": "light_high"
             },
             {
               "ref": 10005,
               "label": "Ближний свет",
-              "style": "light"
+              "style": "light",
+              "passthrough": "light_low"
             },
             {
               "ref": 10009,
               "label": "Тормоз",
-              "style": "brake"
+              "style": "brake",
+              "passthrough": "brake"
             },
             {
               "ref": 10010,
               "label": "Сигнал",
-              "style": "horn"
+              "style": "horn",
+              "passthrough": "horn"
             }
           ]
         }
-      ]
+      ],
+      "bridge": {
+        "mappings": [
+          {
+            "name": "neutral_gear_relay",
+            "input": {
+              "controller": "MB_IO_1",
+              "ref": 10002
+            },
+            "output": {
+              "controller": "MB_IO_1",
+              "address": 1
+            },
+            "debounce_ms": 300,
+            "on_error": "hold"
+          }
+        ]
+      }
     },
     {
       "name": "Трактор LOVOL",
@@ -369,31 +516,37 @@
           "points": [
             {
               "ref": 0,
-              "label": "Колонна красный"
+              "label": "Колонна красный",
+              "passthrough": "di:0"
             },
             {
               "ref": 1,
-              "label": "Колонна зеленый"
+              "label": "Колонна зеленый",
+              "passthrough": "di:1"
             },
             {
               "ref": 2,
               "label": "Колонна сигнал",
-              "style": "horn"
+              "style": "horn",
+              "passthrough": "horn"
             },
             {
               "ref": 10000,
               "label": "Правый поворотник",
-              "style": "indicator"
+              "style": "indicator",
+              "passthrough": "indicator_right"
             },
             {
               "ref": 10001,
               "label": "Левый поворотник",
-              "style": "indicator"
+              "style": "indicator",
+              "passthrough": "indicator_left"
             },
             {
               "ref": 10002,
               "label": "Двигатель",
-              "style": "engine"
+              "style": "engine",
+              "passthrough": "engine"
             }
           ]
         },
@@ -406,42 +559,69 @@
             {
               "ref": 10000,
               "label": "Гудок",
-              "style": "horn"
+              "style": "horn",
+              "passthrough": "horn"
             },
             {
               "ref": 10001,
               "label": "Ручник",
-              "style": "handbrake"
+              "style": "handbrake",
+              "passthrough": "handbrake"
             },
             {
               "ref": 10002,
               "label": "Тормоз",
               "invert": true,
-              "style": "brake"
+              "style": "brake",
+              "passthrough": "brake"
             },
             {
               "ref": 10006,
               "label": "Ближний свет",
-              "style": "light"
+              "style": "light",
+              "passthrough": "light_low"
             },
             {
               "ref": 10008,
               "label": "Дальний свет",
-              "style": "light"
+              "style": "light",
+              "passthrough": "light_high"
             },
             {
               "ref": 10009,
               "label": "Ремень",
               "invert": true,
-              "style": "seatbelt"
+              "style": "seatbelt",
+              "passthrough": "seatbelt"
             }
           ],
           "gear_points": {
             "10004": "R",
             "10005": "F"
+          },
+          "passthrough_gears": {
+            "10004": "gear:R",
+            "10005": "gear:F"
           }
         }
-      ]
+      ],
+      "bridge": {
+        "mappings": [
+          {
+            "name": "handbrake_relay",
+            "input": {
+              "controller": "MB_IO_2",
+              "ref": 10001
+            },
+            "output": {
+              "controller": "MB_IO_1",
+              "address": 0
+            },
+            "debounce_ms": 300,
+            "on_error": "hold"
+          }
+        ]
+      }
     },
     {
       "name": "Трактор Беларус 82.1",
@@ -463,17 +643,20 @@
             {
               "ref": 10001,
               "label": "Ручник",
-              "style": "handbrake"
+              "style": "handbrake",
+              "passthrough": "handbrake"
             },
             {
               "ref": 10002,
               "label": "Ремень",
-              "style": "seatbelt"
+              "style": "seatbelt",
+              "passthrough": "seatbelt"
             },
             {
               "ref": 10003,
               "label": "Двигатель",
-              "style": "engine"
+              "style": "engine",
+              "passthrough": "engine"
             }
           ]
         },
@@ -486,32 +669,38 @@
             {
               "ref": 10000,
               "label": "Тормоз",
-              "style": "brake"
+              "style": "brake",
+              "passthrough": "brake"
             },
             {
               "ref": 10002,
               "label": "Левый поворотник",
-              "style": "indicator"
+              "style": "indicator",
+              "passthrough": "indicator_left"
             },
             {
               "ref": 10003,
               "label": "Правый поворотник",
-              "style": "indicator"
+              "style": "indicator",
+              "passthrough": "indicator_right"
             },
             {
               "ref": 10005,
               "label": "Ближний свет",
-              "style": "light"
+              "style": "light",
+              "passthrough": "light_low"
             },
             {
               "ref": 10008,
               "label": "Ближний свет [10008]",
-              "style": "light"
+              "style": "light",
+              "passthrough": "light_low"
             },
             {
               "ref": 10009,
               "label": "Гудок",
-              "style": "horn"
+              "style": "horn",
+              "passthrough": "horn"
             }
           ]
         },
@@ -536,9 +725,56 @@
           },
           "extra_points": {
             "10023": "SEL"
+          },
+          "passthrough_gears": {
+            "10001": "gear:N",
+            "10002": "gear:F1",
+            "10003": "gear:F2",
+            "10004": "gear:F3",
+            "10005": "gear:F4",
+            "10006": "gear:F5",
+            "10007": "gear:F6",
+            "10008": "gear:F7",
+            "10009": "gear:F8",
+            "10010": "gear:F9",
+            "10021": "gear:R1",
+            "10022": "gear:R2"
+          },
+          "passthrough_extra": {
+            "10023": "gear:SEL"
           }
         }
-      ]
+      ],
+      "bridge": {
+        "mappings": [
+          {
+            "name": "handbrake_relay",
+            "input": {
+              "controller": "MB_IO_1",
+              "ref": 10001
+            },
+            "output": {
+              "controller": "MB_IO_1",
+              "address": 0
+            },
+            "debounce_ms": 300,
+            "on_error": "hold"
+          },
+          {
+            "name": "neutral_gear_relay",
+            "input": {
+              "controller": "MB_IO_3",
+              "ref": 10001
+            },
+            "output": {
+              "controller": "MB_IO_1",
+              "address": 1
+            },
+            "debounce_ms": 300,
+            "on_error": "hold"
+          }
+        ]
+      }
     },
     {
       "name": "Трактор Беларус МТЗ 1523",
@@ -560,27 +796,32 @@
             {
               "ref": 10000,
               "label": "Дальний свет",
-              "style": "light"
+              "style": "light",
+              "passthrough": "light_high"
             },
             {
               "ref": 10001,
               "label": "Ближний свет",
-              "style": "light"
+              "style": "light",
+              "passthrough": "light_low"
             },
             {
               "ref": 10003,
               "label": "Правый поворотник",
-              "style": "indicator"
+              "style": "indicator",
+              "passthrough": "indicator_right"
             },
             {
               "ref": 10004,
               "label": "Левый поворотник",
-              "style": "indicator"
+              "style": "indicator",
+              "passthrough": "indicator_left"
             },
             {
               "ref": 10005,
               "label": "Тормоз",
-              "style": "brake"
+              "style": "brake",
+              "passthrough": "brake"
             }
           ]
         },
@@ -594,31 +835,57 @@
               "ref": 10000,
               "label": "Ремень",
               "invert": true,
-              "style": "seatbelt"
+              "style": "seatbelt",
+              "passthrough": "seatbelt"
             },
             {
               "ref": 10001,
               "label": "Ручник",
-              "style": "handbrake"
+              "style": "handbrake",
+              "passthrough": "handbrake"
             },
             {
               "ref": 10002,
               "label": "Гудок",
-              "style": "horn"
+              "style": "horn",
+              "passthrough": "horn"
             },
             {
               "ref": 10004,
               "label": "Двигатель",
-              "style": "engine"
+              "style": "engine",
+              "passthrough": "engine"
             }
           ],
           "gear_points": {
             "10013": "F",
             "10014": "FH",
             "10005": "КПП задний"
+          },
+          "passthrough_gears": {
+            "10013": "gear:F",
+            "10014": "gear:FH",
+            "10005": "gear:КПП задний"
           }
         }
-      ]
+      ],
+      "bridge": {
+        "mappings": [
+          {
+            "name": "handbrake_relay",
+            "input": {
+              "controller": "MB_IO_2",
+              "ref": 10001
+            },
+            "output": {
+              "controller": "MB_IO_1",
+              "address": 0
+            },
+            "debounce_ms": 300,
+            "on_error": "hold"
+          }
+        ]
+      }
     },
     {
       "name": "Экскаватор YACHAI YC 25-8",
@@ -639,25 +906,30 @@
           "points": [
             {
               "ref": 10000,
-              "label": "Ковш"
+              "label": "Ковш",
+              "passthrough": "di:0"
             },
             {
               "ref": 10001,
-              "label": "Лапа 2 колено"
+              "label": "Лапа 2 колено",
+              "passthrough": "di:1"
             },
             {
               "ref": 10002,
-              "label": "Лапа 1 колено"
+              "label": "Лапа 1 колено",
+              "passthrough": "di:2"
             },
             {
               "ref": 10004,
               "label": "Гудок",
-              "style": "horn"
+              "style": "horn",
+              "passthrough": "horn"
             },
             {
               "ref": 10005,
               "label": "Ближний свет",
-              "style": "light"
+              "style": "light",
+              "passthrough": "light_low"
             }
           ]
         },
@@ -671,28 +943,34 @@
               "ref": 10000,
               "label": "Ремень",
               "invert": true,
-              "style": "seatbelt"
+              "style": "seatbelt",
+              "passthrough": "seatbelt"
             },
             {
               "ref": 10001,
-              "label": "Левый назад"
+              "label": "Левый назад",
+              "passthrough": "di:1"
             },
             {
               "ref": 10002,
-              "label": "Левый вперед"
+              "label": "Левый вперед",
+              "passthrough": "di:2"
             },
             {
               "ref": 10005,
-              "label": "Правый вперед"
+              "label": "Правый вперед",
+              "passthrough": "di:5"
             },
             {
               "ref": 10007,
-              "label": "Правый назад"
+              "label": "Правый назад",
+              "passthrough": "di:7"
             },
-	    {
-	      "ref": 10013,
-	      "label": "Двигатель"
-	    }
+            {
+              "ref": 10013,
+              "label": "Двигатель",
+              "passthrough": "di:13"
+            }
           ]
         }
       ]
@@ -716,23 +994,27 @@
           "points": [
             {
               "ref": 10001,
-              "label": "Наклон подъемника на себя"
+              "label": "Наклон подъемника на себя",
+              "passthrough": "di:1"
             },
             {
               "ref": 10002,
               "invert": true,
-              "label": "Вилы подняты > 30см"
+              "label": "Вилы подняты > 30см",
+              "passthrough": "di:2"
             },
             {
               "ref": 10256,
               "label": "Ручник",
               "invert": true,
-              "style": "handbrake"
+              "style": "handbrake",
+              "passthrough": "handbrake"
             },
             {
               "ref": 10005,
               "label": "Ремень",
-              "style": "seatbelt"
+              "style": "seatbelt",
+              "passthrough": "seatbelt"
             }
           ]
         },
@@ -745,41 +1027,82 @@
             {
               "ref": 10003,
               "label": "Левый поворотник",
-              "style": "indicator"
+              "style": "indicator",
+              "passthrough": "indicator_left"
             },
             {
               "ref": 10004,
               "label": "Правый поворотник",
-              "style": "indicator"
+              "style": "indicator",
+              "passthrough": "indicator_right"
             },
             {
               "ref": 10006,
               "label": "Ближний свет",
-              "style": "light"
+              "style": "light",
+              "passthrough": "light_low"
             },
             {
               "ref": 10007,
               "label": "Тормоз",
-              "style": "break"
+              "style": "break",
+              "passthrough": "brake"
             },
             {
               "ref": 10008,
               "label": "Звуковой сигнал",
-              "style": "horn"
+              "style": "horn",
+              "passthrough": "horn"
             },
             {
               "ref": 10010,
               "label": "Зажигание",
-              "style": "engine"
+              "style": "engine",
+              "passthrough": "engine"
             }
           ],
           "gear_points": {
             "10000": "F",
             "10001": "N",
             "10002": "R"
+          },
+          "passthrough_gears": {
+            "10000": "gear:F",
+            "10001": "gear:N",
+            "10002": "gear:R"
           }
         }
-      ]
+      ],
+      "bridge": {
+        "mappings": [
+          {
+            "name": "handbrake_relay",
+            "input": {
+              "controller": "MB_IO_1",
+              "ref": 10256
+            },
+            "output": {
+              "controller": "MB_IO_1",
+              "address": 0
+            },
+            "debounce_ms": 300,
+            "on_error": "hold"
+          },
+          {
+            "name": "neutral_gear_relay",
+            "input": {
+              "controller": "MB_IO_2",
+              "ref": 10001
+            },
+            "output": {
+              "controller": "MB_IO_1",
+              "address": 1
+            },
+            "debounce_ms": 300,
+            "on_error": "hold"
+          }
+        ]
+      }
     },
     {
       "name": "Электропогрузчик JHLIFT CPD20 (9598MP77)",
@@ -801,22 +1124,26 @@
             {
               "ref": 10001,
               "invert": true,
-              "label": "Вилы подняты > 30см"
+              "label": "Вилы подняты > 30см",
+              "passthrough": "di:1"
             },
             {
               "ref": 10002,
-              "label": "Наклон подъемника на себя"
+              "label": "Наклон подъемника на себя",
+              "passthrough": "di:2"
             },
             {
               "ref": 10256,
               "label": "Ручник",
               "invert": true,
-              "style": "handbrake"
+              "style": "handbrake",
+              "passthrough": "handbrake"
             },
             {
               "ref": 10005,
               "label": "Ремень",
-              "style": "seatbelt"
+              "style": "seatbelt",
+              "passthrough": "seatbelt"
             }
           ]
         },
@@ -829,41 +1156,141 @@
             {
               "ref": 10003,
               "label": "Левый поворотник",
-              "style": "indicator"
+              "style": "indicator",
+              "passthrough": "indicator_left"
             },
             {
               "ref": 10004,
               "label": "Правый поворотник",
-              "style": "indicator"
+              "style": "indicator",
+              "passthrough": "indicator_right"
             },
             {
               "ref": 10006,
               "label": "Ближний свет",
-              "style": "light"
+              "style": "light",
+              "passthrough": "light_low"
             },
             {
               "ref": 10007,
               "label": "Тормоз",
-              "style": "break"
+              "style": "break",
+              "passthrough": "brake"
             },
             {
               "ref": 10008,
               "label": "Звуковой сигнал",
-              "style": "horn"
+              "style": "horn",
+              "passthrough": "horn"
             },
             {
               "ref": 10010,
               "label": "Зажигание",
-              "style": "engine"
+              "style": "engine",
+              "passthrough": "engine"
             }
           ],
           "gear_points": {
             "10000": "F",
             "10001": "N",
             "10002": "R"
+          },
+          "passthrough_gears": {
+            "10000": "gear:F",
+            "10001": "gear:N",
+            "10002": "gear:R"
           }
         }
-      ]
+      ],
+      "bridge": {
+        "mappings": [
+          {
+            "name": "handbrake_relay",
+            "input": {
+              "controller": "MB_IO_1",
+              "ref": 10256
+            },
+            "output": {
+              "controller": "MB_IO_1",
+              "address": 0
+            },
+            "debounce_ms": 300,
+            "on_error": "hold"
+          },
+          {
+            "name": "neutral_gear_relay",
+            "input": {
+              "controller": "MB_IO_2",
+              "ref": 10001
+            },
+            "output": {
+              "controller": "MB_IO_1",
+              "address": 1
+            },
+            "debounce_ms": 300,
+            "on_error": "hold"
+          }
+        ]
+      }
     }
-  ]
+  ],
+  "passthrough": {
+    "enabled": true,
+    "bind": "0.0.0.0",
+    "port": 502,
+    "unitId": 1,
+    "groups": {
+      "handbrake": 1,
+      "seatbelt": 2,
+      "brake": 3,
+      "indicator_left": 4,
+      "indicator_right": 5,
+      "light_low": 6,
+      "light_high": 7,
+      "horn": 8,
+      "engine": 9,
+      "gear:P": 101,
+      "gear:R": 102,
+      "gear:N": 103,
+      "gear:F": 104,
+      "gear:H": 105,
+      "gear:L": 106,
+      "gear:FH": 107,
+      "gear:F1": 111,
+      "gear:F2": 112,
+      "gear:F3": 113,
+      "gear:F4": 114,
+      "gear:F5": 115,
+      "gear:F6": 116,
+      "gear:F7": 117,
+      "gear:F8": 118,
+      "gear:F9": 119,
+      "gear:R1": 121,
+      "gear:R2": 122,
+      "gear:SEL": 130,
+      "gear:КПП_задний": 140,
+      "di:0": 1000,
+      "di:1": 1001,
+      "di:2": 1002,
+      "di:5": 2005,
+      "di:7": 2007,
+      "di:13": 2013
+    }
+  },
+  "logging": {
+    "appLogFile": "logs/app.log",
+    "appLogLevel": "WARNING",
+    "full": {
+      "enabled": true,
+      "dir": "logs/full",
+      "snapshotIntervalSec": 1.0,
+      "rotateBytes": 5242880
+    }
+  },
+  "upload": {
+    "enabled": true,
+    "url": "https://datadump.seburo.ru/ingest",
+    "chunkBytes": 262144,
+    "stateFile": "logs/upload_state.json"
+  }
 }

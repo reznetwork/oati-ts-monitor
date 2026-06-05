@@ -1,0 +1,14 @@
+Package: oati-ts-monitor
+Version: 1.0.0-1
+Architecture: all
+Maintainer: OATI Monitor <monitor@localhost>
+Installed-Size: 380
+Depends: python3, python3-aiohttp, python3-jinja2, python3-pymodbus, iw
+Recommends: wireless-tools
+Suggests: python3-folium
+Section: utils
+Priority: optional
+Homepage: https://github.com/reznetwork/oati-ts-monitor
+Description: Vehicle Modbus monitor daemon and client
+ oati-ts-monitor polls Modbus TCP controllers, optional GNSS/Wi‑Fi enrichment,
+ an HTTP dashboard, JSONL logging, and a local IPC socket for CLI/TUI clients.

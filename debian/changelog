@@ -1,0 +1,5 @@
+oati-ts-monitor (1.0.0-1) unstable; urgency=medium
+
+  * Initial Debian package: daemon, client, templates, log collector, Wi‑Fi log viewer.
+
+ -- OATI Monitor <monitor@localhost>  Thu, 04 Jun 2026 12:00:00 +0000

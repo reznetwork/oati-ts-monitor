@@ -1,0 +1,18 @@
+#!/usr/bin/make -f
+
+export DH_VERBOSE = 1
+
+%:
+	dh $@
+
+override_dh_clean:
+	dh_clean
+	find . -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true
+
+override_dh_auto_install:
+	dh_auto_install
+	install -d debian/oati-ts-monitor/usr/bin
+	install -m 755 packaging/usr/bin/oati-ts-monitor-daemon debian/oati-ts-monitor/usr/bin/
+	install -m 755 packaging/usr/bin/oati-ts-monitor-client debian/oati-ts-monitor/usr/bin/
+	install -m 755 packaging/usr/bin/oati-ts-monitor-log-collector debian/oati-ts-monitor/usr/bin/
+	install -m 755 packaging/usr/bin/oati-ts-monitor-wifilog-viewer debian/oati-ts-monitor/usr/bin/

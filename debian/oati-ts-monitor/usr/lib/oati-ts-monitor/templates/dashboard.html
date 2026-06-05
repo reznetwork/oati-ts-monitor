@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Vehicle Monitor</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #0b1e24; color: #e8f1f2; margin: 0; padding: 0; }
+    header { background: #12313b; padding: 10px 16px 8px 16px; font-size: 20px; position: sticky; top: 0; z-index: 1000; border-bottom: 1px solid #1c3a43; }
+    .topbar-title { display: flex; align-items: center; gap: 10px; }
+    .topbar-status { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 8px; font-size: 13px; align-items: center; }
+    .topbar-log-controls { margin-top: 8px; display: flex; align-items: center; gap: 10px; }
+    .pill { background: #0d1c22; border: 1px solid #1c3a43; border-radius: 999px; padding: 4px 8px; white-space: nowrap; }
+    .log-status-on { color: #4caf50; font-weight: 700; }
+    .log-status-off { color: #f44336; font-weight: 700; }
+    .modbus-status-on { color: #4caf50; font-weight: 700; }
+    .modbus-status-off { color: #f44336; font-weight: 700; }
+    .log-btn {
+      height: 34px;
+      border-radius: 8px;
+      border: 1px solid #2a5663;
+      background: linear-gradient(180deg, #1a4b59 0%, #123944 100%);
+      color: #e8f1f2;
+      font-weight: 700;
+      padding: 0 14px;
+      cursor: pointer;
+      box-shadow: 0 1px 0 rgba(0, 0, 0, 0.35);
+    }
+    .log-btn:hover { filter: brightness(1.1); }
+    .log-btn:active { transform: translateY(1px); }
+    main { padding: 12px 16px 16px 16px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
+    .card { background: #11232b; border: 1px solid #1c3a43; border-radius: 6px; padding: 12px; }
+    .card h3 { margin-top: 0; }
+    .status-ok { color: #4caf50; }
+    .status-bad { color: #f44336; }
+    .points { list-style: none; padding: 0; margin: 8px 0 0 0; display: flex; flex-direction: column; gap: 6px; }
+    .point-row { display: flex; justify-content: space-between; align-items: center; background: #0d1c22; border: 1px solid #1c3a43; border-radius: 4px; padding: 6px 8px; --on:#4caf50; --off:#f44336; }
+    .point-left { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .point-ref { color: #9ad1d4; font-family: monospace; }
+    .point-label { font-weight: 600; }
+    .point-style { background: #1c3a43; border-radius: 4px; padding: 2px 6px; font-size: 12px; color: #9ad1d4; text-transform: capitalize; }
+    .point-state { font-weight: 700; }
+    .state-unknown .point-state { color: #9e9e9e; }
+    .point-row.state-on .point-state { color: var(--on); }
+    .point-row.state-off .point-state { color: var(--off); }
+    .style-handbrake { --on:#f44336; --off:#4caf50; }
+    .style-seatbelt { --on:#4caf50; --off:#f44336; }
+    .style-engine { --on:#4caf50; --off:#f44336; }
+    .style-indicator { --on:#ffeb3b; --off:#cfd8dc; }
+    .chart-header { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+    .chart-value { color: #9ad1d4; font-size: 14px; }
+    .chart-canvas { width: 100%; height: 120px; background: #0d1c22; border: 1px solid #1c3a43; border-radius: 4px; }
+    code { background: #0e1a1f; padding: 2px 4px; border-radius: 3px; }
+    .gear-grid { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+    .gear-btn {
+      width: 44px;
+      height: 44px;
+      border-radius: 6px;
+      border: 1px solid #1c3a43;
+      background: #0d1c22;
+      color: #e8f1f2;
+      font-weight: 800;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-family: monospace;
+    }
+    .gear-btn.gear-on { background: #1f7a3a; border-color: #4caf50; }
+    .gear-btn.gear-unknown { background: #2a2a2a; border-color: #9e9e9e; color: #cfd8dc; }
+    .fleet-dd { position: relative; display: inline-flex; align-items: center; gap: 6px; }
+    .fleet-btn {
+      height: 28px;
+      border-radius: 6px;
+      border: 1px solid #2a5663;
+      background: #0d1c22;
+      color: #e8f1f2;
+      padding: 0 10px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .fleet-menu {
+      position: absolute;
+      top: calc(100% + 6px);
+      left: 0;
+      min-width: 260px;
+      max-height: 320px;
+      overflow: auto;
+      background: #0d1c22;
+      border: 1px solid #2a5663;
+      border-radius: 8px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+      padding: 6px;
+      display: none;
+      z-index: 2000;
+    }
+    .fleet-menu.open { display: block; }
+    .fleet-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 8px 10px;
+      border-radius: 6px;
+      color: #e8f1f2;
+      text-decoration: none;
+      font-size: 13px;
+    }
+    .fleet-item:hover { background: #11232b; }
+    .fleet-meta { color: #9ad1d4; font-family: monospace; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="topbar-title">
+      Vehicle Monitor — <span id="vehicleName"></span> <small id="age"></small>
+      <label style="margin-left: 10px; font-size: 13px; color:#9ad1d4;">
+        Vehicle:
+        <span class="fleet-dd" id="fleetDd">
+          <button id="fleetBtn" class="fleet-btn" type="button">(fleet)</button>
+          <div id="fleetMenu" class="fleet-menu" role="menu" aria-label="Fleet"></div>
+        </span>
+      </label>
+      <a href="/combined" style="color:#9ad1d4; margin-left: 12px;">Combined graph</a>
+      <a href="/logs" style="color:#9ad1d4; margin-left: 12px;">App logs</a>
+      <a href="/wifilogs" style="color:#9ad1d4; margin-left: 12px;">WiFi logs</a>
+    </div>
+    <div class="topbar-status" id="topbarStatus"></div>
+    <div class="topbar-log-controls">
+      <span id="logStatusBadge">Log: OFF</span>
+      <button id="toggleWifiLog" class="log-btn">Start log</button>
+      <span id="modbusStatusBadge">Modbus: ON</span>
+      <button id="toggleModbus" class="log-btn">Disable Modbus</button>
+    </div>
+  </header>
+  <main>
+    <section id="latency"></section>
+    <section class="grid" id="history"></section>
+    <section class="grid" id="controllers"></section>
+    <section id="gnss"></section>
+    <section id="wifi"></section>
+  </main>
+  <script>
+    const state = {{ initial_state | safe }};
+    const vehicleEl = document.getElementById('vehicleName');
+    const ageEl = document.getElementById('age');
+    const controllersEl = document.getElementById('controllers');
+    const latencyEl = document.getElementById('latency');
+    const historyEl = document.getElementById('history');
+    const gnssEl = document.getElementById('gnss');
+    const wifiEl = document.getElementById('wifi');
+    const topbarStatusEl = document.getElementById('topbarStatus');
+    const logStatusBadgeEl = document.getElementById('logStatusBadge');
+    const toggleWifiLogBtn = document.getElementById('toggleWifiLog');
+    const modbusStatusBadgeEl = document.getElementById('modbusStatusBadge');
+    const toggleModbusBtn = document.getElementById('toggleModbus');
+    const fleetDdEl = document.getElementById('fleetDd');
+    const fleetBtnEl = document.getElementById('fleetBtn');
+    const fleetMenuEl = document.getElementById('fleetMenu');
+    let wsConn = null;
+    let currentLogEnabled = false;
+    let currentModbusEnabled = true;
+    const FLEET_HTTP_PORT = 9999;
+    const onlineByIp = {};
+
+    function latencyMsInt(v) {
+      if (typeof v !== 'number' || Number.isNaN(v)) return '--';
+      return `${Math.round(v)} ms`;
+    }
+
+    function fleetLabel(v) {
+      const ip = v?.external_ip || '';
+      const name = v?.short_name || v?.name || ip || 'vehicle';
+      if (!ip) return `${name} (no ip)`;
+      const online = onlineByIp[ip];
+      if (online === true) return `${name} ✅`;
+      if (online === false) return `${name} 🚫`;
+      return `${name} (--)`;
+    }
+
+    function fleetNameOnly(v) {
+      return v?.short_name || v?.name || v?.external_ip || '(fleet)';
+    }
+
+    function buildFleetUrl(ip) {
+      if (!ip) return null;
+      const path = location.pathname || '/';
+      return `http://${ip}:${FLEET_HTTP_PORT}${path}`;
+    }
+
+    function syncFleetSelector(state) {
+      const fleet = Array.isArray(state?.fleet) ? state.fleet : [];
+      const currentIp = fleet.find((v) => v?.short_name && state?.vehicle_short && v.short_name === state.vehicle_short)?.external_ip
+        || fleet.find((v) => v?.name && state?.vehicle && v.name === state.vehicle)?.external_ip
+        || null;
+
+      const current = currentIp ? fleet.find((v) => v?.external_ip === currentIp) : null;
+      fleetBtnEl.textContent = current ? fleetNameOnly(current) : '(fleet)';
+
+      // Rebuild menu (fleet is tiny).
+      fleetMenuEl.innerHTML = '';
+      fleet.forEach((v) => {
+        const ip = v?.external_ip;
+        if (!ip) return;
+        const a = document.createElement('a');
+        a.className = 'fleet-item';
+        a.href = buildFleetUrl(ip) || '#';
+        const left = document.createElement('span');
+        left.textContent = fleetLabel(v);
+        const right = document.createElement('span');
+        right.className = 'fleet-meta';
+        right.textContent = ip;
+        a.appendChild(left);
+        a.appendChild(right);
+        fleetMenuEl.appendChild(a);
+      });
+    }
+
+    async function probeIp(ip) {
+      if (!ip) return false;
+      try {
+        const res = await fetch(`http://${ip}:${FLEET_HTTP_PORT}/ping?ts=${Date.now()}`, { cache: 'no-store' });
+        return res && (res.status === 204 || res.ok);
+      } catch (e) {
+        return false;
+      }
+    }
+
+    async function scanFleetOnline(state) {
+      const fleet = Array.isArray(state?.fleet) ? state.fleet : [];
+      const ips = fleet.map((v) => v?.external_ip).filter(Boolean);
+      await Promise.all(ips.map(async (ip) => { onlineByIp[ip] = await probeIp(ip); }));
+      syncFleetSelector(state);
+    }
+
+    function renderTopbarStatus(state) {
+      const pills = [];
+      const latency = state.display_latency || {};
+      const gateway = latency.gateway || Object.values(latency)[0];
+      if (gateway) {
+        const cls = gateway.status === 'OK' ? 'status-ok' : 'status-bad';
+        pills.push(`<span class="pill">gateway: <span class="${cls}">${gateway.status || '--'}</span> ${latencyMsInt(gateway.latency_ms)}</span>`);
+      } else {
+        pills.push('<span class="pill">gateway: --</span>');
+      }
+
+      for (const [name, info] of Object.entries(state.controllers || {})) {
+        const cls = info.status === 'OK' ? 'status-ok' : 'status-bad';
+        pills.push(`<span class="pill">${name}: <span class="${cls}">${info.status || '--'}</span> ${latencyMsInt(info.latency)}</span>`);
+      }
+
+      const gnss = state.gnss || {};
+      pills.push(`<span class="pill">GNSS: ${gnss.fix || '--'}</span>`);
+
+      const wifi = state.wifi || {};
+      const level = wifi.signal || (typeof wifi.signal_dbm === 'number' ? `${Math.round(wifi.signal_dbm)} dBm` : '--');
+      pills.push(`<span class="pill">WiFi: ${wifi.ssid || '--'} ${level}</span>`);
+
+      topbarStatusEl.innerHTML = pills.join('');
+
+      const logCfg = state.detailed_wifi_logging || {};
+      currentLogEnabled = !!logCfg.enabled;
+      logStatusBadgeEl.className = currentLogEnabled ? 'log-status-on' : 'log-status-off';
+      logStatusBadgeEl.textContent = `Log: ${currentLogEnabled ? 'ON' : 'OFF'}`;
+      if (logCfg.last_error) {
+        logStatusBadgeEl.textContent += ` (${logCfg.last_error})`;
+      }
+      toggleWifiLogBtn.textContent = currentLogEnabled ? 'Stop log' : 'Start log';
+
+      const modbusCfg = state.modbus || {};
+      currentModbusEnabled = modbusCfg.enabled !== false;
+      modbusStatusBadgeEl.className = currentModbusEnabled ? 'modbus-status-on' : 'modbus-status-off';
+      modbusStatusBadgeEl.textContent = `Modbus: ${currentModbusEnabled ? 'ON' : 'OFF'}`;
+      toggleModbusBtn.textContent = currentModbusEnabled ? 'Disable Modbus' : 'Enable Modbus';
+    }
+
+    function renderControllers(ctrls) {
+      controllersEl.innerHTML = '';
+      for (const [name, info] of Object.entries(ctrls || {})) {
+        const card = document.createElement('div');
+        card.className = 'card';
+        const statusClass = info.status === 'OK' ? 'status-ok' : 'status-bad';
+        card.innerHTML = `<h3>${name}</h3>`;
+        const ul = document.createElement('ul');
+        ul.className = 'points';
+        const meta = info.points_meta || {};
+        for (const [ref, val] of Object.entries(info.points || {})) {
+          const pointMeta = meta[ref] || {};
+          const stateTxt = val === null ? 'N/A' : (val ? 'ON' : 'OFF');
+          const stateClass = val === null ? 'state-unknown' : (val ? 'state-on' : 'state-off');
+          const style = pointMeta.style || 'default';
+          const di = typeof pointMeta.di === 'number' ? `DI${pointMeta.di.toString().padStart(2, '0')}` : ref;
+          const li = document.createElement('li');
+          li.className = `point-row ${stateClass} style-${style}`;
+
+          const left = document.createElement('div');
+          left.className = 'point-left';
+          const refEl = document.createElement('span');
+          refEl.className = 'point-ref';
+          refEl.textContent = di;
+          const labelEl = document.createElement('span');
+          labelEl.className = 'point-label';
+          labelEl.textContent = pointMeta.label || ref;
+          const styleEl = document.createElement('span');
+          styleEl.className = 'point-style';
+          styleEl.textContent = style;
+          left.appendChild(refEl);
+          left.appendChild(labelEl);
+          left.appendChild(styleEl);
+
+          const stateEl = document.createElement('div');
+          stateEl.className = 'point-state';
+          stateEl.textContent = stateTxt;
+
+          li.appendChild(left);
+          li.appendChild(stateEl);
+          ul.appendChild(li);
+        }
+        if (Object.keys(info.gears || {}).length) {
+          const li = document.createElement('li');
+          const gearWrap = document.createElement('div');
+          gearWrap.innerHTML = '<strong>Gears</strong>';
+          const grid = document.createElement('div');
+          grid.className = 'gear-grid';
+          for (const [ref, v] of Object.entries(info.gears || {})) {
+            const btn = document.createElement('div');
+            btn.className = 'gear-btn ' + (v === null ? 'gear-unknown' : (v ? 'gear-on' : 'gear-off'));
+            btn.textContent = ref;
+            grid.appendChild(btn);
+          }
+          gearWrap.appendChild(grid);
+          li.appendChild(gearWrap);
+          ul.appendChild(li);
+        }
+        if (Object.keys(info.extra || {}).length) {
+          const li = document.createElement('li');
+          li.innerHTML = '<strong>Extra:</strong> ' + Object.entries(info.extra || {}).map(([ref, v]) => `${ref}:${v ? 'ON' : 'off'}`).join(' ');
+          ul.appendChild(li);
+        }
+        card.appendChild(ul);
+        controllersEl.appendChild(card);
+      }
+    }
+
+    function renderGnss(data) {
+      if (!data) { gnssEl.innerHTML = ''; return; }
+      const age = ((Date.now()/1000) - (data.ts || 0)).toFixed(1);
+      gnssEl.innerHTML = `<h3>GNSS</h3><div>Fix: ${data.fix || 'NO FIX'}, Solution: ${data.solution_level || '--'}, Sats: ${data.sats ?? '--'}, HDOP: ${data.hdop ?? '--'}, Age: ${age}s</div><div>Pos: ${data.lat ?? '--'}, ${data.lon ?? '--'}</div>`;
+    }
+
+    function renderWifi(data) {
+      if (!data) { wifiEl.innerHTML = ''; return; }
+      let html = '<h3>WiFi</h3>';
+      if (data.status === 'connected') {
+        const switchMs = typeof data.bssid_change_ms === 'number' ? `, switch ${data.bssid_change_ms} ms` : '';
+        html += `Connected to ${data.ssid || '(ssid ?)'} (${data.bssid || '--'}) ${data.signal || ''} ${data.freq || ''}${switchMs}`;
+      } else {
+        html += data.status;
+        if (data.error) html += ' - ' + data.error;
+      }
+      wifiEl.innerHTML = html;
+    }
+
+    function lastNumeric(series) {
+      if (!Array.isArray(series)) return null;
+      for (let i = series.length - 1; i >= 0; i -= 1) {
+        const val = series[i]?.value;
+        if (typeof val === 'number') return val;
+      }
+      return null;
+    }
+
+    function sanitizeGraphValue(v) {
+      if (typeof v !== 'number' || Number.isNaN(v) || !Number.isFinite(v)) return null;
+      // Preserve typical negatives (RSSI etc.); clamp overflow-like negative artifacts.
+      if (v < -1000) return -1;
+      return v;
+    }
+
+    function drawSeries(canvas, series, color) {
+      const ctx = canvas.getContext('2d');
+      const w = canvas.width;
+      const h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = '#0d1c22';
+      ctx.fillRect(0, 0, w, h);
+      const points = (series || [])
+        .map((item) => ({ ts: item?.ts, value: sanitizeGraphValue(item?.value) }))
+        .filter((item) => typeof item?.value === 'number');
+      if (!points.length) {
+        ctx.fillStyle = '#9e9e9e';
+        ctx.font = '12px sans-serif';
+        ctx.fillText('no data', 10, 20);
+        return;
+      }
+      const values = points.map((p) => p.value);
+      const minVal = Math.min(...values);
+      const maxVal = Math.max(...values);
+      const span = maxVal - minVal || 1;
+      const view = points.slice(-120);
+      ctx.strokeStyle = color || '#4caf50';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      view.forEach((p, i) => {
+        const x = (i / Math.max(view.length - 1, 1)) * (w - 20) + 10;
+        const y = h - 10 - ((p.value - minVal) / span) * (h - 20);
+        if (i === 0) {
+          ctx.moveTo(x, y);
+        } else {
+          ctx.lineTo(x, y);
+        }
+      });
+      ctx.stroke();
+      ctx.fillStyle = '#9ad1d4';
+      ctx.font = '10px sans-serif';
+      ctx.fillText(minVal.toFixed(1), 8, h - 4);
+      ctx.fillText(maxVal.toFixed(1), 8, 12);
+    }
+
+    function renderHistory(history) {
+      historyEl.innerHTML = '';
+      if (!history) return;
+      const seriesRate = (series) => {
+        if (!Array.isArray(series) || series.length < 2) return [];
+        const out = [];
+        for (let i = 1; i < series.length; i += 1) {
+          const prev = series[i - 1];
+          const cur = series[i];
+          if (typeof prev?.value !== 'number' || typeof cur?.value !== 'number') continue;
+          if (typeof prev?.ts !== 'number' || typeof cur?.ts !== 'number') continue;
+          const dt = cur.ts - prev.ts;
+          if (dt <= 0) continue;
+          const rate = (cur.value - prev.value) / dt / 1024.0;
+          out.push({ ts: cur.ts, value: sanitizeGraphValue(rate) ?? -1 });
+        }
+        return out;
+      };
+      const makeCard = (title, series, unit, color) => {
+        const card = document.createElement('div');
+        card.className = 'card';
+        const header = document.createElement('div');
+        header.className = 'chart-header';
+        const heading = document.createElement('h3');
+        heading.textContent = title;
+        const valueEl = document.createElement('div');
+        valueEl.className = 'chart-value';
+        const lastVal = lastNumeric(series);
+        valueEl.textContent = lastVal === null ? '--' : `${lastVal.toFixed(1)}${unit}`;
+        header.appendChild(heading);
+        header.appendChild(valueEl);
+        const canvas = document.createElement('canvas');
+        canvas.className = 'chart-canvas';
+        canvas.width = 320;
+        canvas.height = 120;
+        card.appendChild(header);
+        card.appendChild(canvas);
+        drawSeries(canvas, series, color);
+        historyEl.appendChild(card);
+      };
+
+      for (const [name, series] of Object.entries(history.modbus_latency || {})) {
+        makeCard(`Modbus latency ${name}`, series, ' ms', '#4caf50');
+      }
+      for (const [name, series] of Object.entries(history.gateway_latency || {})) {
+        makeCard(`Gateway latency ${name}`, series, ' ms', '#ff9800');
+      }
+      const wifi = history.wifi || {};
+      if (wifi.signal_dbm?.length) {
+        makeCard('WiFi signal', wifi.signal_dbm, ' dBm', '#03a9f4');
+      }
+      if (wifi.tx_rate_mbps?.length) {
+        makeCard('WiFi TX rate', wifi.tx_rate_mbps, ' Mbps', '#8bc34a');
+      }
+      if (wifi.rx_rate_mbps?.length) {
+        makeCard('WiFi RX rate', wifi.rx_rate_mbps, ' Mbps', '#cddc39');
+      }
+      if (wifi.tx_bytes?.length) {
+        makeCard('WiFi TX throughput', seriesRate(wifi.tx_bytes), ' KB/s', '#00acc1');
+      }
+      if (wifi.rx_bytes?.length) {
+        makeCard('WiFi RX throughput', seriesRate(wifi.rx_bytes), ' KB/s', '#8e24aa');
+      }
+      if (history.cpu_load?.length) {
+        makeCard('CPU load', history.cpu_load, ' %', '#e91e63');
+      }
+      if (history.cpu_temp_c?.length) {
+        makeCard('SoC temp (soc_thermal-virtual-0)', history.cpu_temp_c, ' °C', '#ff7043');
+      }
+    }
+
+    function render(state) {
+      vehicleEl.textContent = state.vehicle || 'vehicle';
+      const ageSecs = state.last_update ? (Date.now()/1000 - state.last_update).toFixed(1) : 'n/a';
+      ageEl.textContent = `(age ${ageSecs}s)`;
+      syncFleetSelector(state);
+      renderControllers(state.controllers || {});
+      renderTopbarStatus(state);
+      latencyEl.innerHTML = '';
+      renderHistory(state.history);
+      renderGnss(state.gnss);
+      renderWifi(state.wifi);
+    }
+
+    function connect() {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      const ws = new WebSocket(`${proto}://${location.host}/ws`);
+      wsConn = ws;
+      ws.onmessage = (ev) => {
+        try { const msg = JSON.parse(ev.data); if (msg.type === 'state') render(msg.data); } catch (e) { console.error(e); }
+      };
+      ws.onclose = () => setTimeout(connect, 2000);
+    }
+
+    fleetBtnEl.onclick = () => {
+      fleetMenuEl.classList.toggle('open');
+    };
+    document.addEventListener('click', (ev) => {
+      if (!fleetDdEl.contains(ev.target)) fleetMenuEl.classList.remove('open');
+    });
+
+    toggleWifiLogBtn.onclick = () => {
+      if (!wsConn || wsConn.readyState !== WebSocket.OPEN) return;
+      wsConn.send(JSON.stringify({ type: 'set_detailed_wifi_logging', enabled: !currentLogEnabled }));
+    };
+
+    toggleModbusBtn.onclick = () => {
+      if (!wsConn || wsConn.readyState !== WebSocket.OPEN) return;
+      wsConn.send(JSON.stringify({ type: 'set_modbus_enabled', enabled: !currentModbusEnabled }));
+    };
+
+    render(state);
+    connect();
+    scanFleetOnline(state);
+    setInterval(() => scanFleetOnline(state), 10_000);
+  </script>
+</body>
+</html>

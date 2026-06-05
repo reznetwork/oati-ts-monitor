@@ -109,9 +109,37 @@ python monitor.py client tui
 
 Legacy single-process mode still works when no subcommand is passed.
 
+## Debian package
+
+Build a `.deb` on Linux:
+
+```bash
+./scripts/build-deb.sh
+```
+
+On macOS (Docker required):
+
+```bash
+./scripts/build-deb.sh --docker
+```
+
+Install on the target host:
+
+```bash
+sudo dpkg -i ../oati-ts-monitor_1.0.0-1_all.deb
+sudo apt-get install -f   # if dependencies are missing
+sudo systemctl enable --now oati-ts-monitor.service
+```
+
+Installed layout:
+- Binaries: `oati-ts-monitor-daemon`, `oati-ts-monitor-client`, `oati-ts-monitor-log-collector`, `oati-ts-monitor-wifilog-viewer`
+- Application: `/usr/lib/oati-ts-monitor/`
+- Config (editable): `/etc/oati-ts-monitor/monitor_config.json`
+- State/logs: `/var/lib/oati-ts-monitor/`, `/var/log/oati-ts-monitor/`
+
 ## Systemd service
 
-This repo includes a daemon-only unit template: `oati-ts-monitor-daemon.service`.
+This repo includes a daemon-only unit template: `oati-ts-monitor-daemon.service` (for manual installs). The Debian package installs `oati-ts-monitor.service` with FHS paths.
 
 Before enabling it, replace the placeholders in the unit file:
 - `WorkingDirectory=/PATH/TO/oati-ts-monitor`
