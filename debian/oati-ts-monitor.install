@@ -8,6 +8,7 @@ ipc_protocol.py usr/lib/oati-ts-monitor/
 templates usr/lib/oati-ts-monitor/
 log_collector usr/lib/oati-ts-monitor/
 wifilog_viewer usr/lib/oati-ts-monitor/
+passthrough_viewer usr/lib/oati-ts-monitor/
 passthrough_map.xlsx usr/lib/oati-ts-monitor/
 monitor_config_example.json etc/oati-ts-monitor/monitor_config.json
 README.md usr/share/doc/oati-ts-monitor/

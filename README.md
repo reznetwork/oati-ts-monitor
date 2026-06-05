@@ -57,7 +57,20 @@ python client.py status
 python client.py health
 python client.py watch
 python client.py tui
+python -m passthrough_viewer --vehicle segway_villain
 ```
+
+### Passthrough Modbus viewer
+
+When the daemon exposes the passthrough DI mirror (`passthrough.enabled` or `--mirror-di`), you can read the unified discrete-input addresses directly over Modbus/TCP:
+
+```bash
+python -m passthrough_viewer --host 127.0.0.1 --vehicle segway_villain
+python -m passthrough_viewer --watch --interval 0.5 --json
+python -m passthrough_viewer --group handbrake --group seatbelt
+```
+
+Defaults come from `monitor_config.json` (`passthrough.port`, `passthrough.unitId`, `pymodbus.timeout`). Use `--vehicle` to show which controller/ref feeds each passthrough group for that vehicle.
 
 Notes:
 - The client connects to the daemon via `--ipc-host`/`--ipc-port` (defaults: `127.0.0.1:9102`).
@@ -132,7 +145,7 @@ sudo systemctl enable --now oati-ts-monitor.service
 ```
 
 Installed layout:
-- Binaries: `oati-ts-monitor-daemon`, `oati-ts-monitor-client`, `oati-ts-monitor-log-collector`, `oati-ts-monitor-wifilog-viewer`
+- Binaries: `oati-ts-monitor-daemon`, `oati-ts-monitor-client`, `oati-ts-monitor-log-collector`, `oati-ts-monitor-wifilog-viewer`, `oati-ts-monitor-passthrough-viewer`
 - Application: `/usr/lib/oati-ts-monitor/`
 - Config (editable): `/etc/oati-ts-monitor/monitor_config.json`
 - State/logs: `/var/lib/oati-ts-monitor/`, `/var/log/oati-ts-monitor/`
