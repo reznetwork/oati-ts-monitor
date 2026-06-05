@@ -18,25 +18,6 @@ class PassthroughEntry:
     source: Optional[str] = None
 
 
-def chunk_addresses(addresses: List[int], max_span: int = 100) -> List[Tuple[int, int]]:
-    """Split sorted unique addresses into (start, count) spans for Modbus reads."""
-    uniq = sorted(set(addresses))
-    if not uniq:
-        return []
-    spans: List[Tuple[int, int]] = []
-    start = uniq[0]
-    prev = uniq[0]
-    for addr in uniq[1:]:
-        if addr - start + 1 <= max_span and addr == prev + 1:
-            prev = addr
-            continue
-        spans.append((start, prev - start + 1))
-        start = addr
-        prev = addr
-    spans.append((start, prev - start + 1))
-    return spans
-
-
 def build_vehicle_sources(vehicle) -> Dict[str, str]:
     """Map passthrough group name -> human-readable source for one vehicle."""
     out: Dict[str, str] = {}
@@ -154,27 +135,16 @@ class PassthroughReader:
             return out
         assert self.func is not None
 
-        for start, count in chunk_addresses(addresses):
-            bits, err = self._read_bits(start, count, self.func)
+        # Read one address at a time: passthrough groups are sparse and the mirror
+        # server currently handles single-bit reads more reliably than spans.
+        for addr in sorted(set(addresses)):
+            bits, err = self._read_bits(addr, 1, self.func)
             if bits is not None:
-                for offset, bit in enumerate(bits):
-                    addr = start + offset
-                    if addr in out:
-                        out[addr] = bool(bit)
-                continue
-
-            # Fall back to single-address reads for sparse gaps.
-            self.last_error = err
-            if self.verbose:
-                print(f"span read failed, retrying individually @{start} count={count}: {err}", flush=True)
-            for addr in range(start, start + count):
-                if addr not in out:
-                    continue
-                one, one_err = self._read_bits(addr, 1, self.func)
-                if one is not None:
-                    out[addr] = bool(one[0])
-                elif one_err:
-                    self.last_error = one_err
+                out[addr] = bool(bits[0])
+            elif err:
+                self.last_error = err
+                if self.verbose:
+                    print(f"read failed @{addr}: {err}", flush=True)
         return out
 
     def read_entries(self, entries: List[PassthroughEntry]) -> List[Tuple[PassthroughEntry, Optional[bool]]]:

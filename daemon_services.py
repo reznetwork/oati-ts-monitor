@@ -1998,18 +1998,21 @@ def apply_bssid_transition_timing(
 
 
 def call_bits(method, address: int, count: int, unit: int):
-    try:
-        return method(address, count=count, slave=unit), None
-    except TypeError as e1:
+    attempts = (
+        ("device_id", lambda: method(address, count=count, device_id=unit)),
+        ("slave", lambda: method(address, count=count, slave=unit)),
+        ("unit", lambda: method(address, count=count, unit=unit)),
+        ("default", lambda: method(address, count=count)),
+    )
+    errors: List[str] = []
+    for label, call in attempts:
         try:
-            return method(address, count=count, unit=unit), None
-        except TypeError as e2:
-            try:
-                return method(address, count=count), None
-            except Exception as e3:
-                return None, f"kw variants failed: slave({e1}); unit({e2}); no-unit({e3.__class__.__name__}: {e3})"
-    except Exception as e:
-        return None, f"call error: {e.__class__.__name__}: {e}"
+            return call(), None
+        except TypeError as e:
+            errors.append(f"{label}({e})")
+        except Exception as e:
+            return None, f"{label} call error: {e.__class__.__name__}: {e}"
+    return None, "kw variants failed: " + "; ".join(errors)
 
 
 def call_write_coil(method, address: int, value: bool, unit: int):
