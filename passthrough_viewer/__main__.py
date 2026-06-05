@@ -131,6 +131,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.vehicle is not None:
         vehicle = pick_vehicle(appcfg, args.vehicle)
         sources = build_vehicle_sources(vehicle)
+        if not args.group:
+            # Avoid querying global passthrough slots this vehicle does not map.
+            groups = {name: addr for name, addr in groups.items() if name in sources}
     entries = _build_entries(groups, args.group, sources)
 
     reader = PassthroughReader(

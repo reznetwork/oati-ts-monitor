@@ -40,6 +40,7 @@ try:
     from pymodbus.simulator import SimDevice
     from pymodbus.simulator.simcore import SimCore
     from pymodbus.simulator.simdata import DataType, SimData
+    from pymodbus.simulator.simutils import SimUtils
 except Exception:  # pragma: no cover
     ModbusDeviceIdentification = None
     ModbusTcpServer = None
@@ -47,6 +48,7 @@ except Exception:  # pragma: no cover
     SimCore = None
     SimData = None
     DataType = None
+    SimUtils = None
 
 DEFAULT_MODBUS_PORT = 502
 DEFAULT_TIMEOUT = 2.5
@@ -71,18 +73,33 @@ CLIENT_CONNECT_MAX_PER_WINDOW = 5
 class MirrorPassthroughDataBlock:
     """Thread-safe sparse passthrough bit store."""
 
-    def __init__(self):
+    def __init__(self, seed: Optional[Dict[int, bool]] = None):
         self._lock = threading.RLock()
         self._values: Dict[int, bool] = {0: False}
+        if seed:
+            for addr, value in seed.items():
+                self._values[int(addr)] = bool(value)
 
     def snapshot(self) -> Dict[int, bool]:
         with self._lock:
             return dict(self._values)
 
-    def set_bits(self, values: Dict[int, bool]) -> None:
+    def set_bits(self, values: Dict[int, bool]) -> Tuple[Dict[int, bool], List[int]]:
+        """Return changed values and any newly seen addresses."""
+        changed: Dict[int, bool] = {}
+        new_addrs: List[int] = []
         with self._lock:
             for addr, value in values.items():
-                self._values[int(addr)] = bool(value)
+                a = int(addr)
+                v = bool(value)
+                if a not in self._values:
+                    self._values[a] = v
+                    changed[a] = v
+                    new_addrs.append(a)
+                elif self._values[a] != v:
+                    self._values[a] = v
+                    changed[a] = v
+        return changed, new_addrs
 
 
 class ModbusDiscreteInputsMirrorServer:
@@ -121,7 +138,10 @@ class ModbusDiscreteInputsMirrorServer:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._server: Any = None
 
-        self._data_block = MirrorPassthroughDataBlock()
+        seed_addrs = {0: False}
+        for addr in self._ref_map.values():
+            seed_addrs[int(addr)] = False
+        self._data_block = MirrorPassthroughDataBlock(seed_addrs)
         self._simdevice = self._build_simdevice(self._data_block.snapshot())
         self._identity = ModbusDeviceIdentification()
         self._identity.VendorName = "oati-ts-monitor"
@@ -139,12 +159,47 @@ class ModbusDiscreteInputsMirrorServer:
             simdata=(bit_entries, bit_entries, reg_seed, reg_seed),
         )
 
-    def _publish_bits(self, values: Dict[int, bool]) -> None:
-        self._data_block.set_bits(values)
+    def _get_runtime(self):
+        server = self._server
+        if server is None or SimCore is None:
+            return None
+        core = server.context
+        devices = getattr(core, "devices", None)
+        if not isinstance(devices, dict):
+            return None
+        return devices.get(self.unit_id) or devices.get(0)
+
+    def _patch_bit_block(self, block_id: str, address: int, value: bool) -> None:
+        runtime = self._get_runtime()
+        if runtime is None:
+            return
+        block = runtime.block.get(block_id)
+        if block is None:
+            return
+        start_address, register_count, registers, bit_values = block
+        offset = int(address) - int(start_address)
+        if offset < 0 or offset >= register_count:
+            return
+        v = 1 if bool(value) else 0
+        registers[offset] = v
+        bit_values[offset] = v
+
+    def _rebuild_context(self) -> None:
         self._simdevice = self._build_simdevice(self._data_block.snapshot())
         server = self._server
         if server is not None:
             server.context = SimCore(self._simdevice)
+
+    def _publish_bits(self, values: Dict[int, bool]) -> None:
+        changed, new_addrs = self._data_block.set_bits(values)
+        if not changed:
+            return
+        if new_addrs or self._get_runtime() is None:
+            self._rebuild_context()
+            return
+        for addr, val in changed.items():
+            self._patch_bit_block("d", int(addr), bool(val))
+            self._patch_bit_block("c", int(addr), bool(val))
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
