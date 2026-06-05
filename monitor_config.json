@@ -95,24 +95,32 @@
               "label": "Правый поворотник",
               "style": "indicator",
               "passthrough": "indicator_right"
-            },
+            }
+          ]
+        },
+        {
+          "name": "MB_IO_3",
+          "model": "ET-7051",
+          "host": "172.16.101.8",
+          "base": 10000,
+          "points": [
             {
-              "ref": 10004,
-              "label": "Ближний свет",
-              "style": "light",
-              "passthrough": "light_low"
-            },
-            {
-              "ref": 10009,
+              "ref": 10003,
               "label": "Тормоз",
               "style": "brake",
               "passthrough": "brake"
             },
             {
-              "ref": 10010,
+              "ref": 10002,
               "label": "Сигнал",
               "style": "horn",
               "passthrough": "horn"
+            },
+            {
+              "ref": 10001,
+              "label": "Ближний свет",
+              "style": "light",
+              "passthrough": "light_low"
             }
           ]
         }
