@@ -105,7 +105,7 @@
           "base": 10000,
           "points": [
             {
-              "ref": 10003,
+              "ref": 10000,
               "label": "Тормоз",
               "style": "brake",
               "passthrough": "brake"
