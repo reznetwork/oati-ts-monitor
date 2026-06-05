@@ -35,15 +35,18 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     ModbusTcpClient = None
 try:
-    from pymodbus.datastore import ModbusServerContext, ModbusDeviceContext, ModbusSparseDataBlock
     from pymodbus.pdu.device import ModbusDeviceIdentification
-    from pymodbus.server import StartAsyncTcpServer
+    from pymodbus.server import ModbusTcpServer
+    from pymodbus.simulator import SimDevice
+    from pymodbus.simulator.simcore import SimCore
+    from pymodbus.simulator.simdata import DataType, SimData
 except Exception:  # pragma: no cover
-    ModbusServerContext = None
-    ModbusDeviceContext = None
-    ModbusSparseDataBlock = None
     ModbusDeviceIdentification = None
-    StartAsyncTcpServer = None
+    ModbusTcpServer = None
+    SimDevice = None
+    SimCore = None
+    SimData = None
+    DataType = None
 
 DEFAULT_MODBUS_PORT = 502
 DEFAULT_TIMEOUT = 2.5
@@ -65,46 +68,31 @@ CLIENT_CONNECT_WINDOW_SEC = 60.0
 CLIENT_CONNECT_MAX_PER_WINDOW = 5
 
 
-class MirrorDiscreteInputsDataBlock:
-    """
-    Thread-safe sparse discrete-inputs block.
-
-    We intentionally keep it sparse because the project's refs are often "absolute"
-    (e.g. 10000+), and we want to expose the same numbering as Modbus addresses.
-    """
+class MirrorPassthroughDataBlock:
+    """Thread-safe sparse passthrough bit store."""
 
     def __init__(self):
-        if ModbusSparseDataBlock is None:
-            raise RuntimeError("pymodbus server components are required to run DI mirror server")
         self._lock = threading.RLock()
-        # pymodbus 3.13's ModbusDeviceContext simulator path expects non-empty blocks.
-        # Seed address 0 with OFF; real refs will overwrite as soon as data arrives.
-        self._values: Dict[int, int] = {0: 0}
-        self._block = ModbusSparseDataBlock(self._values)
+        self._values: Dict[int, bool] = {0: False}
 
-    @property
-    def block(self):
-        return self._block
-
-    def set_bit(self, address: int, value: bool) -> None:
-        a = int(address)
-        v = 1 if bool(value) else 0
+    def snapshot(self) -> Dict[int, bool]:
         with self._lock:
-            self._values[a] = v
+            return dict(self._values)
 
     def set_bits(self, values: Dict[int, bool]) -> None:
         with self._lock:
-            for a, v in values.items():
-                self._values[int(a)] = 1 if bool(v) else 0
+            for addr, value in values.items():
+                self._values[int(addr)] = bool(value)
 
 
 class ModbusDiscreteInputsMirrorServer:
     """
-    Expose collected Modbus boolean refs as Modbus/TCP Discrete Inputs (FC02).
+    Expose collected Modbus boolean refs as Modbus/TCP passthrough bits.
 
     Addressing policy:
-    - Discrete input address == collected Modbus ref (e.g. ref 10001 -> DI address 10001).
+    - Passthrough address == configured group DI (e.g. handbrake -> 1).
     - Values with None are skipped (last known value is kept).
+    - FC02 discrete inputs are primary; FC01 coils mirror the same bits for compatibility.
     """
 
     def __init__(
@@ -118,7 +106,7 @@ class ModbusDiscreteInputsMirrorServer:
         ref_map: Optional[Dict[Tuple[str, int], int]] = None,
         logger: Optional[logging.Logger] = None,
     ):
-        if StartAsyncTcpServer is None or ModbusDeviceContext is None or ModbusServerContext is None:
+        if ModbusTcpServer is None or SimDevice is None or SimCore is None:
             raise RuntimeError("pymodbus server components are required to run DI mirror server")
         self.state = state
         self.bind_host = str(bind_host)
@@ -131,19 +119,32 @@ class ModbusDiscreteInputsMirrorServer:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._server: Any = None
 
-        self._di_block = MirrorDiscreteInputsDataBlock()
-        # Discrete Inputs = `di`, not coils/holding/input regs.
-        self._store = ModbusDeviceContext(di=self._di_block.block)
-        # pymodbus 3.13 ModbusServerContext expects either a single device context
-        # (single=True) or simulator SimDevice structures. For our purposes, a
-        # single device context is sufficient (typical clients use unit id 1).
-        self._context = ModbusServerContext(devices=self._store, single=True)
-
+        self._data_block = MirrorPassthroughDataBlock()
+        self._simdevice = self._build_simdevice(self._data_block.snapshot())
         self._identity = ModbusDeviceIdentification()
         self._identity.VendorName = "oati-ts-monitor"
         self._identity.ProductName = "DI mirror"
         self._identity.MajorMinorRevision = "1.0"
+
+    def _build_simdevice(self, values: Dict[int, bool]) -> SimDevice:
+        bit_entries = [
+            SimData(address=int(addr), values=bool(val), datatype=DataType.BITS)
+            for addr, val in sorted(values.items())
+        ]
+        reg_seed = [SimData(address=0, values=0, datatype=DataType.REGISTERS)]
+        return SimDevice(
+            id=self.unit_id,
+            simdata=(bit_entries, bit_entries, reg_seed, reg_seed),
+        )
+
+    def _publish_bits(self, values: Dict[int, bool]) -> None:
+        self._data_block.set_bits(values)
+        self._simdevice = self._build_simdevice(self._data_block.snapshot())
+        server = self._server
+        if server is not None:
+            server.context = SimCore(self._simdevice)
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -211,18 +212,20 @@ class ModbusDiscreteInputsMirrorServer:
             try:
                 bits = self._collect_bits()
                 if bits:
-                    self._di_block.set_bits(bits)
+                    self._publish_bits(bits)
             except Exception as e:
                 self.logger.warning("DI mirror refresh failed: %s", e)
 
     async def _run_async(self) -> None:
         refresher = asyncio.create_task(self._refresher())
+        server = ModbusTcpServer(
+            context=self._simdevice,
+            identity=self._identity,
+            address=(self.bind_host, self.port),
+        )
+        self._server = server
         try:
-            await StartAsyncTcpServer(
-                context=self._context,
-                identity=self._identity,
-                address=(self.bind_host, self.port),
-            )
+            await server.serve_forever()
         finally:
             self._stop_event.set()
             self.state.update_event.set()
