@@ -1297,7 +1297,7 @@
   },
   "upload": {
     "enabled": true,
-    "url": "https://datadump.seburo.ru/ingest",
+    "url": "http://188.72.73.232:59876/ingest",
     "chunkBytes": 262144,
     "stateFile": "logs/upload_state.json"
   }
