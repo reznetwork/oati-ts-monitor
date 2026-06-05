@@ -19,7 +19,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 try:
     import jinja2
@@ -134,6 +134,7 @@ class ModbusDiscreteInputsMirrorServer:
         unit_id: int = 1,
         refresh_sec: float = 0.2,
         ref_map: Optional[Dict[Tuple[str, int], int]] = None,
+        seed_addresses: Optional[Iterable[int]] = None,
         logger: Optional[logging.Logger] = None,
     ):
         if StartAsyncTcpServer is None or ModbusDeviceContext is None or ModbusServerContext is None:
@@ -151,6 +152,8 @@ class ModbusDiscreteInputsMirrorServer:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
         seed_addrs = {0: False}
+        for addr in seed_addresses or ():
+            seed_addrs[int(addr)] = False
         for addr in self._ref_map.values():
             seed_addrs[int(addr)] = False
         self._data_block = MirrorPassthroughDataBlock(seed_addrs)

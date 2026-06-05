@@ -287,6 +287,7 @@ def run_daemon(args: argparse.Namespace) -> int:
             port=di_port,
             unit_id=di_unit,
             ref_map=ref_map if ref_map else None,
+            seed_addresses=appcfg.passthrough.groups.values(),
         )
         di_mirror.start()
     print(json.dumps({"daemon": "started", "ipc": f"{args.ipc_bind}:{args.ipc_port}", "vehicle": vehicle.name, "vehicle_short": getattr(vehicle, "short_name", None)}))
