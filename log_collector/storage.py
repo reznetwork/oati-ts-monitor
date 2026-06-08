@@ -1,17 +1,15 @@
 """
-Persistent storage for received log chunks.
+Persistent storage for received compressed log files.
 
-Segments are stored under:
+Compressed segments are stored under:
   <data_dir>/<device_id>/<vehicle_short>/<segment_name>
-
-Chunks are expected to arrive in order (start == current file size).
-Out-of-order or duplicate chunks are rejected with an explicit error so
-the sender can retry from the correct offset.
 """
 
 from __future__ import annotations
 
 import asyncio
+import gzip
+import hashlib
 import json
 import os
 import time
@@ -28,7 +26,7 @@ class SegmentMeta:
     segment: str
     path: Path
     bytes_received: int
-    chunks_received: int
+    files_received: int
     first_seen: float
     last_seen: float
 
@@ -40,7 +38,8 @@ class SegmentMeta:
             "segment": self.segment,
             "path": str(self.path),
             "bytes_received": self.bytes_received,
-            "chunks_received": self.chunks_received,
+            "files_received": self.files_received,
+            "chunks_received": self.files_received,
             "first_seen": self.first_seen,
             "last_seen": self.last_seen,
         }
@@ -52,13 +51,13 @@ class DeviceSummary:
     vehicles: List[str] = field(default_factory=list)
     total_bytes: int = 0
     total_segments: int = 0
-    total_chunks: int = 0
+    total_files: int = 0
     first_seen: float = 0.0
     last_seen: float = 0.0
 
 
 class ChunkStorage:
-    """Thread-safe, asyncio-friendly storage that reassembles NDJSON segment files."""
+    """Thread-safe, asyncio-friendly storage for compressed NDJSON segment files."""
 
     def __init__(self, data_dir: str | Path) -> None:
         self._data_dir = Path(data_dir).expanduser().resolve()
@@ -67,14 +66,14 @@ class ChunkStorage:
         # {(device_id, vehicle_short, segment) -> SegmentMeta}
         self._segments: Dict[Tuple[str, str, str], SegmentMeta] = {}
         self._total_bytes = 0
-        self._total_chunks = 0
+        self._total_files = 0
         self._load_existing()
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    async def ingest(
+    async def ingest_file(
         self,
         *,
         device_id: str,
@@ -82,49 +81,47 @@ class ChunkStorage:
         vehicle_short: str,
         segment: str,
         schema_version: int,
-        chunk_start: int,
-        chunk_end: int,
+        file_bytes: int,
+        sha256: str,
         payload: bytes,
     ) -> None:
-        """Write a chunk to the correct segment file.
+        """Write a complete compressed segment file.
 
-        Raises ValueError for protocol violations (gap, wrong size, etc.).
+        Raises ValueError for protocol violations (wrong size/checksum, etc.).
         Raises OSError for filesystem errors.
         """
         if not payload:
             raise ValueError("empty payload")
-        if chunk_end - chunk_start != len(payload):
-            raise ValueError(
-                f"X-Chunk-Bytes mismatch: header says {chunk_end - chunk_start}, "
-                f"body is {len(payload)} bytes"
-            )
+        if file_bytes != len(payload):
+            raise ValueError(f"X-File-Bytes mismatch: header says {file_bytes}, body is {len(payload)} bytes")
+        if sha256:
+            digest = hashlib.sha256(payload).hexdigest()
+            if digest.lower() != sha256.lower():
+                raise ValueError("X-File-Sha256 mismatch")
+        if not payload.startswith(b"\x1f\x8b"):
+            raise ValueError("payload is not gzip-compressed")
 
         device_id = _sanitize(device_id) or "unknown"
         vehicle_short = _sanitize(vehicle_short or vehicle) or "unknown"
-        segment = _sanitize_filename(segment) or f"segment_{int(time.time() * 1000)}.jsonl"
+        segment = _sanitize_filename(segment) or f"segment_{int(time.time() * 1000)}.jsonl.gz"
+        if not segment.endswith(".jsonl.gz"):
+            raise ValueError("compressed log filename must end with .jsonl.gz")
 
         key = (device_id, vehicle_short, segment)
         seg_path = self._data_dir / device_id / vehicle_short / segment
 
         async with self._lock:
             seg_path.parent.mkdir(parents=True, exist_ok=True)
-            current_size = seg_path.stat().st_size if seg_path.exists() else 0
-
-            if chunk_start != current_size:
-                raise ValueError(
-                    f"chunk gap: file has {current_size} bytes, "
-                    f"chunk starts at {chunk_start}"
-                )
-
-            mode = "ab" if chunk_start > 0 else "wb"
-            with seg_path.open(mode) as fh:
+            tmp_path = seg_path.with_suffix(seg_path.suffix + f".{os.getpid()}.tmp")
+            with tmp_path.open("wb") as fh:
                 fh.write(payload)
+            tmp_path.replace(seg_path)
 
             now = time.time()
             if key in self._segments:
                 meta = self._segments[key]
-                meta.bytes_received += len(payload)
-                meta.chunks_received += 1
+                meta.bytes_received = len(payload)
+                meta.files_received += 1
                 meta.last_seen = now
             else:
                 meta = SegmentMeta(
@@ -134,14 +131,14 @@ class ChunkStorage:
                     segment=segment,
                     path=seg_path,
                     bytes_received=len(payload),
-                    chunks_received=1,
+                    files_received=1,
                     first_seen=now,
                     last_seen=now,
                 )
                 self._segments[key] = meta
 
             self._total_bytes += len(payload)
-            self._total_chunks += 1
+            self._total_files += 1
 
     async def get_segments(self, device_id: Optional[str] = None) -> List[SegmentMeta]:
         async with self._lock:
@@ -164,7 +161,7 @@ class ChunkStorage:
             d = devices[m.device_id]
             d.total_bytes += m.bytes_received
             d.total_segments += 1
-            d.total_chunks += m.chunks_received
+            d.total_files += m.files_received
             d.first_seen = min(d.first_seen, m.first_seen)
             d.last_seen = max(d.last_seen, m.last_seen)
             vs = m.vehicle_short
@@ -175,11 +172,12 @@ class ChunkStorage:
     async def stats(self) -> dict:
         async with self._lock:
             total_bytes = self._total_bytes
-            total_chunks = self._total_chunks
+            total_files = self._total_files
             total_segments = len(self._segments)
         return {
             "total_bytes": total_bytes,
-            "total_chunks": total_chunks,
+            "total_files": total_files,
+            "total_chunks": total_files,
             "total_segments": total_segments,
             "data_dir": str(self._data_dir),
         }
@@ -194,7 +192,8 @@ class ChunkStorage:
             return []
         lines: List[dict] = []
         try:
-            with seg_path.open("rb") as fh:
+            opener = gzip.open if seg_path.name.endswith(".gz") else open
+            with opener(seg_path, "rb") as fh:
                 raw_lines = fh.readlines()
             for raw in raw_lines[-max_lines:]:
                 raw = raw.strip()
@@ -213,8 +212,7 @@ class ChunkStorage:
 
     def _load_existing(self) -> None:
         """Scan data_dir on startup to populate in-memory index."""
-        now = time.time()
-        for seg_path in sorted(self._data_dir.rglob("segment_*.jsonl")):
+        for seg_path in sorted([*self._data_dir.rglob("segment_*.jsonl.gz"), *self._data_dir.rglob("segment_*.jsonl")]):
             parts = seg_path.relative_to(self._data_dir).parts
             if len(parts) < 3:
                 continue
@@ -229,7 +227,7 @@ class ChunkStorage:
                 segment=segment,
                 path=seg_path,
                 bytes_received=stat.st_size,
-                chunks_received=0,
+                files_received=0,
                 first_seen=mtime,
                 last_seen=mtime,
             )

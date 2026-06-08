@@ -25,7 +25,7 @@ from .storage import ChunkStorage
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="python -m log_collector",
-        description="oati-ts-monitor log collector – receives and stores NDJSON log chunks.",
+        description="oati-ts-monitor log collector - receives and stores compressed NDJSON log files.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--bind", default="0.0.0.0", metavar="HOST",

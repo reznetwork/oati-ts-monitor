@@ -41,11 +41,11 @@ Optional services:
 - `--full-log-dir` base directory for full logs (default from config or `logs/full`)
 - `--full-log-interval` full snapshot interval seconds (default from config)
 - `--full-log-rotate-bytes` rotate segment after N bytes (default from config)
-- `--upload` enable background HTTP upload of full logs (chunked, resumable)
-- `--upload-url` collector endpoint for chunk uploads
+- `--upload` enable background HTTP upload of compressed full log files
+- `--upload-url` collector endpoint for file uploads
 - `--upload-device-id` device identifier to include in upload headers
-- `--upload-chunk-bytes` chunk size in bytes
-- `--upload-state-file` upload cursor state JSON path
+- `--upload-chunk-bytes` deprecated; uploads now send one compressed file at a time
+- `--upload-state-file` upload file state JSON path
 
 IPC (client communication):
 - `--ipc-bind` (default `127.0.0.1`) and `--ipc-port` (default `9102`)

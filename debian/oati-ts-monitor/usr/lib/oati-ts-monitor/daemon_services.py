@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import ast
+import gzip
+import hashlib
 import json
 import json as jsonlib
 import logging
@@ -56,6 +58,7 @@ TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 
 # Full-fidelity log schema
 FULL_LOG_SCHEMA_VERSION = 1
+FULL_LOG_COMPRESSED_SUFFIX = ".jsonl.gz"
 
 # Reconnect rate limiting (prevents controller-side session buildup if reconnect is spammed)
 RECONNECT_WINDOW_SEC = 30.0
@@ -420,7 +423,7 @@ class AppCfg:
     full_log_dir: str = "logs/full"
     full_log_snapshot_interval_sec: float = 1.0
     full_log_rotate_bytes: int = 5 * 1024 * 1024
-    # HTTP upload (chunked, resumable)
+    # HTTP upload (compressed whole-file transfer)
     upload_enabled: bool = False
     upload_url: Optional[str] = None
     upload_device_id: Optional[str] = None
@@ -783,6 +786,9 @@ class FullFidelityLogger:
         if self.thread:
             self.thread.join(timeout=2)
 
+    def current_segment_path(self) -> Optional[Path]:
+        return self._current_path
+
     def enqueue(self, record: Dict[str, Any]) -> None:
         if not self.enabled:
             return
@@ -972,10 +978,10 @@ class FullFidelityLogger:
 
 class HttpLogUploader:
     """
-    Chunked, resumable HTTP uploader for full-fidelity logs.
+    Whole-file HTTP uploader for compressed full-fidelity logs.
 
-    - Uploads newline-aligned byte ranges from segment files under `base_dir`.
-    - Persists per-file byte offsets in `state_file` so it can resume on restart.
+    - Compresses inactive `segment_*.jsonl` files to `segment_*.jsonl.gz`.
+    - Uploads complete gzip files and marks each file complete after HTTP success.
     """
 
     def __init__(
@@ -989,6 +995,7 @@ class HttpLogUploader:
         state_file: str,
         vehicle: str,
         vehicle_short: str,
+        active_segment_getter: Optional[Any] = None,
     ):
         self.enabled = bool(enabled)
         self.base_dir = str(base_dir or "logs/full")
@@ -998,11 +1005,12 @@ class HttpLogUploader:
         self.state_file = Path(state_file or "logs/upload_state.json").expanduser()
         self.vehicle = str(vehicle or "")
         self.vehicle_short = str(vehicle_short or "")
+        self.active_segment_getter = active_segment_getter
         self.stop_event = threading.Event()
         self.thread: Optional[threading.Thread] = None
         self.last_error: Optional[str] = None
         self._lock = threading.Lock()
-        self._state: Dict[str, Any] = {"v": 1, "files": {}}
+        self._state: Dict[str, Any] = {"v": 2, "uploaded": {}, "files": {}}
 
     def start(self) -> None:
         if not self.enabled or not self.url:
@@ -1040,10 +1048,25 @@ class HttpLogUploader:
         base = Path(self.base_dir).expanduser()
         if not base.exists():
             return []
-        # Only upload JSONL segments, never wifilogs.
+        return sorted(base.rglob(f"segment_*{FULL_LOG_COMPRESSED_SUFFIX}"), key=lambda p: (str(p.parent), p.name))
+
+    def _active_segment(self) -> Optional[Path]:
+        getter = self.active_segment_getter
+        if getter is None:
+            return None
+        try:
+            active = getter()
+            return Path(active).expanduser().resolve() if active else None
+        except Exception:
+            return None
+
+    def _list_uncompressed_segments(self) -> List[Path]:
+        base = Path(self.base_dir).expanduser()
+        if not base.exists():
+            return []
         return sorted(base.rglob("segment_*.jsonl"), key=lambda p: (str(p.parent), p.name))
 
-    def _get_offset(self, path: Path) -> int:
+    def _legacy_offset(self, path: Path) -> int:
         with self._lock:
             files = self._state.setdefault("files", {})
             try:
@@ -1051,49 +1074,95 @@ class HttpLogUploader:
             except Exception:
                 return 0
 
-    def _set_offset(self, path: Path, offset: int) -> None:
+    def _mark_uploaded(self, path: Path) -> None:
+        try:
+            st = path.stat()
+            entry = {"size": int(st.st_size), "mtime": float(st.st_mtime)}
+        except OSError:
+            entry = {"size": 0, "mtime": 0.0}
         with self._lock:
-            files = self._state.setdefault("files", {})
-            files[str(path)] = int(max(0, offset))
+            uploaded = self._state.setdefault("uploaded", {})
+            uploaded[str(path)] = entry
 
-    def _read_chunk_newline_aligned(self, path: Path, start: int) -> Tuple[bytes, int]:
-        """
-        Returns (payload_bytes, end_offset_exclusive).
-        End offset is advanced to the end of a line (newline included) when possible.
-        """
-        st = path.stat()
-        size = int(st.st_size)
-        if start >= size:
-            return b"", start
-        end_target = min(size, start + self.chunk_bytes)
+    def _is_uploaded(self, path: Path) -> bool:
+        try:
+            st = path.stat()
+            size = int(st.st_size)
+            mtime = float(st.st_mtime)
+        except OSError:
+            return False
+        with self._lock:
+            entry = self._state.setdefault("uploaded", {}).get(str(path))
+        if entry is True:
+            return True
+        if isinstance(entry, dict):
+            try:
+                return int(entry.get("size", -1)) == size and abs(float(entry.get("mtime", -1.0)) - mtime) < 0.001
+            except Exception:
+                return False
+        return False
+
+    def _compress_segment(self, path: Path) -> Optional[Path]:
+        if path.name.endswith(FULL_LOG_COMPRESSED_SUFFIX):
+            return path
+        try:
+            resolved = path.expanduser().resolve()
+            active = self._active_segment()
+            if active is not None and resolved == active:
+                return None
+            st = path.stat()
+            if st.st_size <= 0:
+                return None
+            # Avoid racing the logger before it has published its active path.
+            if time.time() - float(st.st_mtime) < 2.0:
+                return None
+            gz_path = path.with_name(path.name + ".gz")
+            tmp_path = gz_path.with_suffix(gz_path.suffix + ".tmp")
+            legacy_fully_uploaded = self._legacy_offset(path) >= int(st.st_size)
+            with path.open("rb") as src, gzip.open(tmp_path, "wb", compresslevel=6) as dst:
+                while True:
+                    chunk = src.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    dst.write(chunk)
+            tmp_path.replace(gz_path)
+            path.unlink()
+            if legacy_fully_uploaded:
+                self._mark_uploaded(gz_path)
+            return gz_path
+        except OSError as e:
+            self.last_error = str(e)
+            return None
+
+    def _compress_backlog(self) -> None:
+        for path in self._list_uncompressed_segments():
+            if self.stop_event.is_set():
+                break
+            self._compress_segment(path)
+
+    def _sha256_file(self, path: Path) -> str:
+        h = hashlib.sha256()
         with path.open("rb") as fh:
-            fh.seek(start)
-            data = fh.read(end_target - start)
-            if not data:
-                return b"", start
-            end = start + len(data)
-            if end < size and not data.endswith(b"\n"):
-                # Extend to the next newline, with a small cap to avoid huge lines.
-                extra = fh.read(64 * 1024)
-                if extra:
-                    nl = extra.find(b"\n")
-                    if nl >= 0:
-                        data += extra[: nl + 1]
-                        end += nl + 1
-        return data, end
+            while True:
+                data = fh.read(1024 * 1024)
+                if not data:
+                    break
+                h.update(data)
+        return h.hexdigest()
 
-    def _post_chunk(self, segment: Path, start: int, end: int, payload: bytes) -> None:
+    def _post_file(self, segment: Path) -> None:
         assert self.url is not None
+        payload = segment.read_bytes()
         req = urllib.request.Request(self.url, method="POST", data=payload)
-        req.add_header("Content-Type", "application/x-ndjson")
+        req.add_header("Content-Type", "application/gzip")
+        req.add_header("X-Log-Compression", "gzip")
         req.add_header("X-Schema-Version", str(FULL_LOG_SCHEMA_VERSION))
         req.add_header("X-Device-Id", self.device_id)
         req.add_header("X-Vehicle", self.vehicle)
         req.add_header("X-Vehicle-Short", self.vehicle_short)
         req.add_header("X-Log-Segment", segment.name)
-        req.add_header("X-Chunk-Start", str(start))
-        req.add_header("X-Chunk-End", str(end))
-        req.add_header("X-Chunk-Bytes", str(len(payload)))
+        req.add_header("X-File-Bytes", str(len(payload)))
+        req.add_header("X-File-Sha256", self._sha256_file(segment))
         with urllib.request.urlopen(req, timeout=10) as resp:
             code = int(getattr(resp, "status", 200))
             if code < 200 or code >= 300:
@@ -1104,19 +1173,19 @@ class HttpLogUploader:
         while not self.stop_event.is_set():
             try:
                 did_work = False
+                self._compress_backlog()
                 for p in self._list_segments():
                     if self.stop_event.is_set():
                         break
                     try:
-                        off = self._get_offset(p)
-                        payload, end = self._read_chunk_newline_aligned(p, off)
-                        if not payload:
+                        if self._is_uploaded(p):
                             continue
-                        self._post_chunk(p, off, end, payload)
-                        self._set_offset(p, end)
+                        self._post_file(p)
+                        self._mark_uploaded(p)
                         did_work = True
                         backoff = 0.5
-                        # Persist progress frequently so crashes don't re-upload too much.
+                        self.last_error = None
+                        # Persist after every confirmed file so retries stay per-file.
                         self._save_state()
                     except (OSError, urllib.error.URLError, urllib.error.HTTPError, RuntimeError) as e:
                         self.last_error = str(e)

@@ -169,11 +169,11 @@ def build_daemon_parser() -> argparse.ArgumentParser:
     ap.add_argument("--full-log-dir", type=str, default=None, help="Base directory for full logs (default from config or logs/full)")
     ap.add_argument("--full-log-interval", type=float, default=None, help="Full snapshot interval seconds (default from config)")
     ap.add_argument("--full-log-rotate-bytes", type=int, default=None, help="Rotate full log segments after N bytes")
-    ap.add_argument("--upload", action="store_true", help="Enable HTTP upload of full logs (chunked/resumable)")
-    ap.add_argument("--upload-url", type=str, default=None, help="HTTP endpoint URL for uploading log chunks")
+    ap.add_argument("--upload", action="store_true", help="Enable HTTP upload of compressed full log files")
+    ap.add_argument("--upload-url", type=str, default=None, help="HTTP endpoint URL for uploading log files")
     ap.add_argument("--upload-device-id", type=str, default=None, help="Device identifier to include in upload headers")
-    ap.add_argument("--upload-chunk-bytes", type=int, default=None, help="Upload chunk size in bytes")
-    ap.add_argument("--upload-state-file", type=str, default=None, help="Path to upload cursor state JSON")
+    ap.add_argument("--upload-chunk-bytes", type=int, default=None, help="Deprecated; full log upload now sends one compressed file at a time")
+    ap.add_argument("--upload-state-file", type=str, default=None, help="Path to upload file state JSON")
     ap.add_argument("--ipc-bind", type=str, default="127.0.0.1")
     ap.add_argument("--ipc-port", type=int, default=9102)
     ap.add_argument("--mirror-di", action="store_true", help="Expose collected boolean refs as Modbus/TCP discrete inputs (FC2)")
@@ -252,7 +252,7 @@ def run_daemon(args: argparse.Namespace) -> int:
     )
     full_logger.start()
 
-    # HTTP upload (chunked, resumable). On startup it flushes any backlog automatically.
+    # HTTP upload. On startup it compresses and flushes any inactive backlog automatically.
     upload_enabled = bool(appcfg.upload_enabled) or bool(getattr(args, "upload", False))
     upload_url = args.upload_url if getattr(args, "upload_url", None) else appcfg.upload_url
     upload_device_id = args.upload_device_id if getattr(args, "upload_device_id", None) else appcfg.upload_device_id
@@ -267,6 +267,7 @@ def run_daemon(args: argparse.Namespace) -> int:
         state_file=str(upload_state_file or "logs/upload_state.json"),
         vehicle=vehicle.name,
         vehicle_short=getattr(vehicle, "short_name", None) or "",
+        active_segment_getter=full_logger.current_segment_path,
     )
     uploader.start()
 

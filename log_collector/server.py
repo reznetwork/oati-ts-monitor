@@ -1,11 +1,11 @@
 """
 oati-ts-monitor Log Collector Server
 
-Receives chunked NDJSON uploads from oati-ts-monitor daemons and exposes
+Receives compressed NDJSON log-file uploads from oati-ts-monitor daemons and exposes
 a minimal web dashboard for browsing received data.
 
 Endpoints:
-  POST /ingest                            – receive a log chunk
+  POST /ingest                            – receive a compressed log file
   GET  /                                  – HTML dashboard
   GET  /api/status                        – JSON overall stats
   GET  /api/devices                       – JSON device list
@@ -41,36 +41,37 @@ async def handle_ingest(request: web.Request) -> web.Response:
         vehicle     = request.headers.get("X-Vehicle", "")
         vehicle_short = request.headers.get("X-Vehicle-Short", "") or vehicle
         segment     = request.headers["X-Log-Segment"]
-        chunk_start = int(request.headers["X-Chunk-Start"])
-        chunk_end   = int(request.headers["X-Chunk-End"])
+        file_bytes  = int(request.headers["X-File-Bytes"])
+        sha256      = request.headers.get("X-File-Sha256", "")
         schema_ver  = int(request.headers.get("X-Schema-Version", "1"))
     except (KeyError, ValueError) as exc:
         raise web.HTTPBadRequest(reason=f"Missing or invalid header: {exc}") from exc
 
     content_type = request.content_type or ""
-    if "ndjson" not in content_type and "json" not in content_type:
-        logger.warning("Unexpected Content-Type '%s' from %s", content_type, device_id)
+    compression = request.headers.get("X-Log-Compression", "").lower()
+    if compression != "gzip" and "gzip" not in content_type and request.headers.get("Content-Encoding", "").lower() != "gzip":
+        raise web.HTTPBadRequest(reason="compressed gzip log files are required")
 
     payload = await request.read()
 
     try:
-        await storage.ingest(
+        await storage.ingest_file(
             device_id=device_id,
             vehicle=vehicle,
             vehicle_short=vehicle_short,
             segment=segment,
             schema_version=schema_ver,
-            chunk_start=chunk_start,
-            chunk_end=chunk_end,
+            file_bytes=file_bytes,
+            sha256=sha256,
             payload=payload,
         )
     except ValueError as exc:
-        logger.warning("Rejected chunk from %s/%s: %s", device_id, segment, exc)
+        logger.warning("Rejected file from %s/%s: %s", device_id, segment, exc)
         raise web.HTTPConflict(reason=str(exc)) from exc
 
     logger.info(
-        "✓ %s/%s  chunk %d–%d  (%d bytes)",
-        device_id, segment, chunk_start, chunk_end, len(payload),
+        "✓ %s/%s  file  (%d bytes)",
+        device_id, segment, len(payload),
     )
     return web.Response(status=200, text="ok")
 
@@ -96,7 +97,8 @@ async def handle_devices(request: web.Request) -> web.Response:
             "vehicles": d.vehicles,
             "total_bytes": d.total_bytes,
             "total_segments": d.total_segments,
-            "total_chunks": d.total_chunks,
+            "total_files": d.total_files,
+            "total_chunks": d.total_files,
             "first_seen": _fmt_ts(d.first_seen),
             "last_seen": _fmt_ts(d.last_seen),
         }
@@ -261,7 +263,7 @@ _DASHBOARD_HTML = """\
   <div class="stats-grid" id="stats-grid">
     <div class="stat-card"><div class="label">Devices</div><div class="value" id="s-devices">–</div></div>
     <div class="stat-card"><div class="label">Segments</div><div class="value" id="s-segments">–</div></div>
-    <div class="stat-card"><div class="label">Chunks</div><div class="value" id="s-chunks">–</div></div>
+    <div class="stat-card"><div class="label">Files</div><div class="value" id="s-files">–</div></div>
     <div class="stat-card"><div class="label">Data received</div><div class="value" id="s-bytes">–</div><div class="sub" id="s-bytes-raw"></div></div>
     <div class="stat-card"><div class="label">Uptime</div><div class="value" id="s-uptime">–</div></div>
   </div>
@@ -285,7 +287,7 @@ _DASHBOARD_HTML = """\
       <table id="segments-table">
         <thead><tr>
           <th>Device</th><th>Vehicle</th><th>Segment</th>
-          <th>Size</th><th>Chunks</th><th>Last chunk</th><th></th>
+          <th>Size</th><th>Files</th><th>Last upload</th><th></th>
         </tr></thead>
         <tbody id="segments-tbody"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
       </table>
@@ -336,7 +338,7 @@ async function refresh() {
 
   document.getElementById('s-devices').textContent = devices.length;
   document.getElementById('s-segments').textContent = status.total_segments;
-  document.getElementById('s-chunks').textContent = status.total_chunks;
+  document.getElementById('s-files').textContent = status.total_files ?? status.total_chunks;
   document.getElementById('s-bytes').textContent = fmtBytes(status.total_bytes);
   document.getElementById('s-bytes-raw').textContent = status.total_bytes.toLocaleString() + ' bytes';
   document.getElementById('s-uptime').textContent = fmtUptime(status.uptime_sec);
@@ -370,7 +372,7 @@ async function refresh() {
         <td><span class="badge">${s.vehicle_short}</span></td>
         <td style="font-size:12px">${s.segment}</td>
         <td>${fmtBytes(s.bytes_received)}</td>
-        <td>${s.chunks_received}</td>
+        <td>${s.files_received ?? s.chunks_received}</td>
         <td>${reltime(s.last_seen)}</td>
         <td><button onclick="viewSegment('${s.device_id}','${s.vehicle_short}','${s.segment}')"
             style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);
