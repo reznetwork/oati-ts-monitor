@@ -4,7 +4,8 @@ import argparse
 import json
 import sys
 import time
-from typing import Any, Dict, List, Optional
+from datetime import datetime
+from typing import Any, Callable, Dict, List, Optional
 
 from daemon_services import load_config, pick_vehicle, silence_lib_logs
 
@@ -26,8 +27,9 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--unit", type=int, default=None, help="Modbus unit id (default: passthrough.unitId from config)")
     ap.add_argument("--timeout", type=float, default=None, help="Socket timeout seconds (default: pymodbus.timeout from config)")
     ap.add_argument("--group", "-g", action="append", default=None, help="Filter to specific passthrough group(s); repeatable")
-    ap.add_argument("--watch", "-w", action="store_true", help="Poll continuously")
-    ap.add_argument("--interval", type=float, default=1.0, help="Poll interval seconds in watch mode")
+    ap.add_argument("--watch", "-w", action="store_true", help="Poll and refresh display until Ctrl+C")
+    ap.add_argument("--interval", type=float, default=1.0, help="Seconds between polls in watch mode")
+    ap.add_argument("--no-clear", action="store_true", help="In watch mode, append output instead of clearing the screen")
     ap.add_argument("--json", action="store_true", help="Emit JSON instead of a table")
     ap.add_argument("--verbose", action="store_true", help="Show pymodbus diagnostics")
     ap.add_argument("--no-coils", action="store_true", help="Disable FC01 coils fallback when FC02 fails")
@@ -113,6 +115,48 @@ def _snapshot_payload(
         "error": error,
         "values": rows,
     }
+
+
+def _clear_screen() -> None:
+    sys.stdout.write("\033[2J\033[H")
+    sys.stdout.flush()
+
+
+def watch_until_quit(
+    poll_once: Callable[[], Dict[str, Any]],
+    *,
+    interval: float = 1.0,
+    json_output: bool = False,
+    clear_screen: bool = True,
+) -> None:
+    """Poll passthrough values and refresh the display until interrupted."""
+    interval = max(0.1, float(interval))
+    try:
+        while True:
+            payload = poll_once()
+            if json_output:
+                print(json.dumps(payload, ensure_ascii=False), flush=True)
+            else:
+                if clear_screen:
+                    _clear_screen()
+                ts = datetime.fromtimestamp(float(payload.get("ts") or time.time())).strftime("%H:%M:%S")
+                header = (
+                    f"passthrough viewer  {ts}  "
+                    f"{payload.get('host')}:{payload.get('port')}  "
+                    f"unit={payload.get('unit')}  func={payload.get('func')}  "
+                    f"mode={payload.get('read_mode')}"
+                )
+                if payload.get("vehicle"):
+                    header += f"  vehicle={payload['vehicle']}"
+                print(header)
+                if payload.get("error"):
+                    print(f"read error: {payload['error']}", file=sys.stderr)
+                print(_render_table(payload["values"]))
+                print("\nPress Ctrl+C to quit", flush=True)
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        if not json_output:
+            print("\nStopped.", flush=True)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -209,16 +253,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
 
         if args.watch:
-            while True:
-                payload = poll_once()
-                if args.json:
-                    print(json.dumps(payload, ensure_ascii=False))
-                else:
-                    if payload.get("error"):
-                        print(f"read error: {payload['error']}", file=sys.stderr)
-                    print(_render_table(payload["values"]))
-                    print()
-                time.sleep(max(0.1, float(args.interval)))
+            watch_until_quit(
+                poll_once,
+                interval=args.interval,
+                json_output=args.json,
+                clear_screen=not args.no_clear,
+            )
         else:
             payload = poll_once()
             if payload.get("error") and not payload["values"]:

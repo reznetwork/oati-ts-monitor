@@ -150,7 +150,7 @@ def build_daemon_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="oati monitor daemon")
     ap.add_argument("--config", type=str, default="monitor_config.json")
     ap.add_argument("--vehicle", type=str, default=None)
-    ap.add_argument("--poll", type=float, default=1.0)
+    ap.add_argument("--poll", type=float, default=None, help="Polling interval seconds (default from config)")
     ap.add_argument("--poll-net", type=float, default=None)
     ap.add_argument("--port", type=int, default=502)
     ap.add_argument("--timeout", type=float, default=2.5)
@@ -201,8 +201,6 @@ def run_daemon(args: argparse.Namespace) -> int:
         write_default_config,
     )
 
-    if args.poll_net is None:
-        args.poll_net = args.poll
     if args.log_interval is not None and args.log_interval <= 0:
         args.log_interval = None
     silence_lib_logs(args.verbose)
@@ -210,6 +208,14 @@ def run_daemon(args: argparse.Namespace) -> int:
         write_default_config(args.config)
         print(f"Created default config at {args.config}")
     appcfg = load_config(args.config)
+    if args.poll is None:
+        args.poll = appcfg.poll_interval_sec
+    if args.poll <= 0:
+        raise SystemExit("--poll must be > 0")
+    if args.poll_net is None:
+        args.poll_net = args.poll
+    if args.poll_net <= 0:
+        raise SystemExit("--poll-net must be > 0")
     if args.unit is not None:
         args.unit_candidates = [args.unit]
     if args.port == 502:
@@ -286,6 +292,7 @@ def run_daemon(args: argparse.Namespace) -> int:
             bind_host=di_bind,
             port=di_port,
             unit_id=di_unit,
+            refresh_sec=float(args.poll),
             ref_map=ref_map if ref_map else None,
             seed_addresses=appcfg.passthrough.groups.values(),
         )

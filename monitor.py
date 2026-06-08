@@ -26,7 +26,7 @@ JSON config (save as monitor_config.json)
 ----------------------------------------
 # Minimal working example for your current setup (ICPDAS ET-7002/ET-7051 + MB_IO_3):
   {
-    "pymodbus": {"port": 502, "timeout": 2.5, "unitCandidates": [1, 255, 0], "coilsFallback": true},
+    "pymodbus": {"port": 502, "timeout": 2.5, "pollIntervalSec": 0.05, "unitCandidates": [1, 255, 0], "coilsFallback": true},
     "gnss": {"host": "192.168.1.50", "port": 2947},
     "wifi": {"interface": "wlp2s0", "refreshSeconds": 2},
     "display": {"latencyHosts": [{"name": "gateway", "host": "192.168.1.1"}]},
@@ -154,7 +154,7 @@ except ModuleNotFoundError:  # pragma: no cover
 locale.setlocale(locale.LC_ALL, '')
 
 # ---------------- Defaults ----------------
-DEFAULT_POLL_INTERVAL_SEC = 1
+DEFAULT_POLL_INTERVAL_SEC = 1.0
 DEFAULT_MODBUS_PORT = 502
 DEFAULT_TIMEOUT = 2.5
 DEFAULT_UNIT_CANDIDATES = [1, 255, 0]
@@ -193,6 +193,7 @@ class VehicleCfg:
 class AppCfg:
     port: int = DEFAULT_MODBUS_PORT
     timeout: float = DEFAULT_TIMEOUT
+    poll_interval_sec: float = DEFAULT_POLL_INTERVAL_SEC
     unit_candidates: List[int] = field(default_factory=lambda: DEFAULT_UNIT_CANDIDATES[:])
     coils_fallback: bool = DEFAULT_COILS_FALLBACK
     gnss_host: Optional[str] = None
@@ -480,14 +481,30 @@ def _as_int_keys(d: Dict[str, Any]) -> Dict[int, str]:
             continue
     return out
 
+
+def _as_positive_float(value: Any, default: float) -> float:
+    try:
+        parsed = float(value)
+        if parsed > 0:
+            return parsed
+    except Exception:
+        pass
+    return float(default)
+
+
 def load_config(path: str) -> AppCfg:
     with open(path, 'r', encoding='utf-8') as f:
         raw = json.load(f)
 
-    modbus_port = int(raw.get('pymodbus', {}).get('port', DEFAULT_MODBUS_PORT))
-    timeout = float(raw.get('pymodbus', {}).get('timeout', DEFAULT_TIMEOUT))
-    unit_candidates = list(raw.get('pymodbus', {}).get('unitCandidates', DEFAULT_UNIT_CANDIDATES))
-    coils_fallback = bool(raw.get('pymodbus', {}).get('coilsFallback', DEFAULT_COILS_FALLBACK))
+    modbus_cfg = raw.get('pymodbus', {}) or {}
+    modbus_port = int(modbus_cfg.get('port', DEFAULT_MODBUS_PORT))
+    timeout = float(modbus_cfg.get('timeout', DEFAULT_TIMEOUT))
+    poll_interval_sec = _as_positive_float(
+        modbus_cfg.get('pollIntervalSec', modbus_cfg.get('pollInterval', modbus_cfg.get('pollSeconds'))),
+        DEFAULT_POLL_INTERVAL_SEC,
+    )
+    unit_candidates = list(modbus_cfg.get('unitCandidates', DEFAULT_UNIT_CANDIDATES))
+    coils_fallback = bool(modbus_cfg.get('coilsFallback', DEFAULT_COILS_FALLBACK))
     gnss_cfg = raw.get('gnss', {}) or {}
     gnss_host = gnss_cfg.get('host')
     gnss_port = gnss_cfg.get('port')
@@ -538,6 +555,7 @@ def load_config(path: str) -> AppCfg:
     return AppCfg(
         port=modbus_port,
         timeout=timeout,
+        poll_interval_sec=poll_interval_sec,
         unit_candidates=unit_candidates,
         coils_fallback=coils_fallback,
         gnss_host=str(gnss_host) if gnss_host else None,
@@ -551,7 +569,13 @@ def load_config(path: str) -> AppCfg:
 # --- Auto-bootstrap default config if missing ---
 def write_default_config(path: str) -> None:
     default = {
-        "pymodbus": {"port": DEFAULT_MODBUS_PORT, "timeout": DEFAULT_TIMEOUT, "unitCandidates": DEFAULT_UNIT_CANDIDATES, "coilsFallback": DEFAULT_COILS_FALLBACK},
+        "pymodbus": {
+            "port": DEFAULT_MODBUS_PORT,
+            "timeout": DEFAULT_TIMEOUT,
+            "pollIntervalSec": DEFAULT_POLL_INTERVAL_SEC,
+            "unitCandidates": DEFAULT_UNIT_CANDIDATES,
+            "coilsFallback": DEFAULT_COILS_FALLBACK,
+        },
         "gnss": {"host": "192.168.1.50", "port": 2947},
         "wifi": {"interface": "wlp2s0", "refreshSeconds": 2},
         "display": {"latencyHosts": [{"name": "gateway", "host": "192.168.1.1"}]},
@@ -1021,8 +1045,11 @@ class Poller:
         self.debug_msgs: Dict[str, str] = {}
         self.last_net_check_time = 0.0
         self.last_wifi_check_time = 0.0
+        self.last_system_check_time = 0.0
+        self.system_refresh_interval = 1.0
         self.gnss_client: Optional[GNSSClient] = None
-        self.wifi_refresh_interval = self.appcfg.wifi_refresh if self.appcfg.wifi_refresh is not None else self.args.poll * 2
+        self.poll_interval = _as_positive_float(getattr(self.args, "poll", None), DEFAULT_POLL_INTERVAL_SEC)
+        self.wifi_refresh_interval = self.appcfg.wifi_refresh if self.appcfg.wifi_refresh is not None else self.poll_interval * 2
         self.poll_net_interval = self.args.poll_net
         self._reconnect_times = deque()  # monotonic timestamps
         self._modbus_enabled = True
@@ -1193,16 +1220,24 @@ class Poller:
             self.last_wifi_check_time = now
 
         self.refresh_gnss()
-        self.state.set_cpu_load(get_cpu_load())
+        if now - self.last_system_check_time >= self.system_refresh_interval:
+            self.state.set_cpu_load(get_cpu_load())
+            self.last_system_check_time = now
 
     def start(self):
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
 
     def _loop(self):
+        interval = self.poll_interval
+        next_deadline = time.monotonic()
         while not self.stop_event.is_set():
             self.run_once()
-            if self.stop_event.wait(self.args.poll):
+            next_deadline += interval
+            now = time.monotonic()
+            if next_deadline <= now:
+                next_deadline = now + interval
+            if self.stop_event.wait(max(0.0, next_deadline - now)):
                 break
 
     def stop(self):
@@ -1746,7 +1781,7 @@ def parse_args():
     ap.add_argument("--unit", type=int, help="Force a single unit id (overrides candidates)")
     ap.add_argument("--unit-candidates", type=int, nargs="*", default=DEFAULT_UNIT_CANDIDATES, help="Unit ids to try (default 1 255 0)")
     ap.add_argument("--no-coils", dest="coils", action="store_false", help="Disable fallback to read_coils if DI fails")
-    ap.add_argument("--poll", type=float, default=DEFAULT_POLL_INTERVAL_SEC, help=f"Polling interval seconds (default {DEFAULT_POLL_INTERVAL_SEC})")
+    ap.add_argument("--poll", type=float, default=None, help="Polling interval seconds (default from config)")
     ap.add_argument("--poll-net", type=float, default=None, help="Network/latency polling interval seconds (default --poll)")
     ap.add_argument("--diag", action="store_true", help="Run diagnostics and exit")
     ap.add_argument("--verbose", action="store_true", help="Enable verbose pymodbus logging (stdout/stderr)")
@@ -1756,9 +1791,6 @@ def parse_args():
     ap.add_argument("--log-file", type=str, default=None, help="Path to JSONL log file (disabled if not set)")
     ap.add_argument("--log-interval", type=float, default=None, help="Seconds between log writes (default: on every update)")
     args = ap.parse_args()
-
-    if args.poll_net is None:
-        args.poll_net = args.poll
 
     if args.log_interval is not None and args.log_interval <= 0:
         args.log_interval = None
@@ -1809,6 +1841,15 @@ def main():
         write_default_config(args.config)
         print(f"Created default config at {args.config}")
     appcfg = load_config(args.config)
+
+    if args.poll is None:
+        args.poll = appcfg.poll_interval_sec
+    if args.poll <= 0:
+        raise SystemExit("--poll must be > 0")
+    if args.poll_net is None:
+        args.poll_net = args.poll
+    if args.poll_net <= 0:
+        raise SystemExit("--poll-net must be > 0")
 
     # Apply global overrides from CLI if provided
     if args.unit is not None:

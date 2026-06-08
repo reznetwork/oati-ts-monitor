@@ -24,7 +24,7 @@ The daemon keeps polling until you stop it (Ctrl+C or systemd stop).
 Run the Modbus polling loop:
 - `--config` path to `monitor_config.json` (default `monitor_config.json`)
 - `--vehicle` select vehicle by name or index (1-based)
-- `--poll` polling interval seconds (default `1.0`)
+- `--poll` polling interval seconds (default from `pymodbus.pollIntervalSec`)
 - `--poll-net` TCP reachability / latency check interval seconds (default: same as `--poll`)
 - `--port` Modbus TCP port override (default from config)
 - `--timeout` socket timeout seconds (default from config)
@@ -66,6 +66,7 @@ When the daemon exposes the passthrough DI mirror (`passthrough.enabled` or `--m
 
 ```bash
 python -m passthrough_viewer --host 127.0.0.1 --vehicle segway_villain
+python -m passthrough_viewer --watch --interval 0.5
 python -m passthrough_viewer --watch --interval 0.5 --json
 python -m passthrough_viewer --group handbrake --group seatbelt
 ```
@@ -179,6 +180,7 @@ The daemon/client use a single JSON config file (default: `monitor_config.json`)
 - `pymodbus`
   - `port` (int): Modbus TCP port (default `502`)
   - `timeout` (number): TCP timeout seconds (default `2.5`)
+  - `pollIntervalSec` (number): Modbus polling interval seconds; `0.05` gives a 20Hz tick rate when the controller read pass completes within 50ms
   - `unitCandidates` (int array): Modbus unit IDs to probe (default `1,255,0`)
   - `coilsFallback` (boolean): if `true`, fall back to Modbus coils (FC1) when discrete inputs fail (FC2)
 - `gnss` (optional)

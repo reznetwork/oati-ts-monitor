@@ -2,6 +2,7 @@
   "pymodbus": {
     "port": 502,
     "timeout": 2.5,
+    "pollIntervalSec": 0.05,
     "unitCandidates": [
       1,
       255,
