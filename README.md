@@ -173,6 +173,32 @@ Watch logs:
 journalctl -u oati-ts-monitor-daemon.service -f
 ```
 
+## Log collector
+
+Run the collector directly from a checkout:
+
+```bash
+python3 -m pip install -r log_collector/requirements.txt
+python3 -m log_collector --bind 0.0.0.0 --port 9000 --data-dir ./received_logs
+```
+
+With the Debian package installed, run it with systemd:
+
+```bash
+sudo systemctl enable --now oati-ts-monitor-log-collector.service
+journalctl -u oati-ts-monitor-log-collector.service -f
+```
+
+For a manual systemd install, copy the included unit first:
+
+```bash
+sudo cp oati-ts-monitor-log-collector.service /etc/systemd/system/oati-ts-monitor-log-collector.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now oati-ts-monitor-log-collector.service
+```
+
+The collector listens at `http://<host>:9000/ingest` and shows its dashboard at `http://<host>:9000/`.
+
 ## `monitor_config.json` documentation
 
 The daemon/client use a single JSON config file (default: `monitor_config.json`). Key top-level sections:
