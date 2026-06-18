@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import ast
+import gzip
+import hashlib
 import json
 import json as jsonlib
 import logging
@@ -19,7 +21,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 try:
     import jinja2
@@ -34,9 +36,20 @@ try:
     from pymodbus.client import ModbusTcpClient
 except ModuleNotFoundError:  # pragma: no cover
     ModbusTcpClient = None
+try:
+    from pymodbus.datastore import ModbusDeviceContext, ModbusServerContext, ModbusSparseDataBlock
+    from pymodbus.pdu.device import ModbusDeviceIdentification
+    from pymodbus.server import StartAsyncTcpServer
+except Exception:  # pragma: no cover
+    ModbusDeviceContext = None
+    ModbusDeviceIdentification = None
+    ModbusServerContext = None
+    ModbusSparseDataBlock = None
+    StartAsyncTcpServer = None
 
 DEFAULT_MODBUS_PORT = 502
 DEFAULT_TIMEOUT = 2.5
+DEFAULT_POLL_INTERVAL_SEC = 1.0
 DEFAULT_UNIT_CANDIDATES = [1, 255, 0]
 DEFAULT_COILS_FALLBACK = True
 MAX_MODBUS_REF_SPAN = 100  # Modbus read 'count' upper bound per request
@@ -45,6 +58,7 @@ TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 
 # Full-fidelity log schema
 FULL_LOG_SCHEMA_VERSION = 1
+FULL_LOG_COMPRESSED_SUFFIX = ".jsonl.gz"
 
 # Reconnect rate limiting (prevents controller-side session buildup if reconnect is spammed)
 RECONNECT_WINDOW_SEC = 30.0
@@ -53,6 +67,212 @@ RECONNECT_MAX_PER_WINDOW = 3
 # Per-controller connect() spam guard (protects controller's 12-session hard limit)
 CLIENT_CONNECT_WINDOW_SEC = 60.0
 CLIENT_CONNECT_MAX_PER_WINDOW = 5
+
+
+class MirrorPassthroughDataBlock:
+    """Thread-safe sparse passthrough bit store."""
+
+    def __init__(self, seed: Optional[Dict[int, bool]] = None):
+        if ModbusSparseDataBlock is None:
+            raise RuntimeError("pymodbus server components are required to run DI mirror server")
+        self._lock = threading.RLock()
+        self._values: Dict[int, int] = {0: 0}
+        block_values: Dict[int, int] = {self._block_address(0): 0}
+        if seed:
+            for addr, value in seed.items():
+                a = int(addr)
+                v = 1 if bool(value) else 0
+                self._values[a] = v
+                block_values[self._block_address(a)] = v
+        self._block = ModbusSparseDataBlock(block_values)
+
+    @property
+    def block(self):
+        return self._block
+
+    @staticmethod
+    def _block_address(address: int) -> int:
+        # ModbusDeviceContext increments request addresses before datastore access.
+        return int(address) + 1
+
+    def snapshot(self) -> Dict[int, bool]:
+        with self._lock:
+            return {addr: bool(value) for addr, value in self._values.items()}
+
+    def set_bits(self, values: Dict[int, bool]) -> Tuple[Dict[int, bool], List[int]]:
+        """Return changed values and any newly seen addresses."""
+        changed: Dict[int, bool] = {}
+        new_addrs: List[int] = []
+        with self._lock:
+            for addr, value in values.items():
+                a = int(addr)
+                v = 1 if bool(value) else 0
+                if a not in self._values:
+                    self._values[a] = v
+                    changed[a] = bool(v)
+                    new_addrs.append(a)
+                elif self._values[a] != v:
+                    self._values[a] = v
+                    changed[a] = bool(v)
+                if a in changed:
+                    self._block.setValues(self._block_address(a), [v])
+        return changed, new_addrs
+
+
+class ModbusDiscreteInputsMirrorServer:
+    """
+    Expose collected Modbus boolean refs as Modbus/TCP passthrough bits.
+
+    Addressing policy:
+    - Passthrough address == configured group DI (e.g. handbrake -> 1).
+    - Values with None are skipped (last known value is kept).
+    - FC02 discrete inputs are primary; FC01 coils mirror the same bits for compatibility.
+    """
+
+    def __init__(
+        self,
+        *,
+        state: "AppState",
+        bind_host: str = "0.0.0.0",
+        port: int = 502,
+        unit_id: int = 1,
+        refresh_sec: float = 0.2,
+        ref_map: Optional[Dict[Tuple[str, int], int]] = None,
+        seed_addresses: Optional[Iterable[int]] = None,
+        logger: Optional[logging.Logger] = None,
+    ):
+        if StartAsyncTcpServer is None or ModbusDeviceContext is None or ModbusServerContext is None:
+            raise RuntimeError("pymodbus server components are required to run DI mirror server")
+        self.state = state
+        self.bind_host = str(bind_host)
+        self.port = int(port)
+        self.unit_id = int(unit_id)
+        self.refresh_sec = float(refresh_sec)
+        self._ref_map = dict(ref_map or {})
+        self.logger = logger or logging.getLogger("modbus_di_mirror")
+
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+        seed_addrs = {0: False}
+        for addr in seed_addresses or ():
+            seed_addrs[int(addr)] = False
+        for addr in self._ref_map.values():
+            seed_addrs[int(addr)] = False
+        self._data_block = MirrorPassthroughDataBlock(seed_addrs)
+        self._store = ModbusDeviceContext(di=self._data_block.block, co=self._data_block.block)
+        self._context = ModbusServerContext(devices=self._store, single=True)
+        self._identity = ModbusDeviceIdentification()
+        self._identity.VendorName = "oati-ts-monitor"
+        self._identity.ProductName = "DI mirror"
+        self._identity.MajorMinorRevision = "1.0"
+
+    def _publish_bits(self, values: Dict[int, bool]) -> None:
+        self._data_block.set_bits(values)
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._thread_main, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        self.state.update_event.set()
+        if self._loop:
+            try:
+                self._loop.call_soon_threadsafe(lambda: None)
+            except Exception:
+                pass
+        if self._thread:
+            self._thread.join(timeout=2)
+
+    def _lookup_ref_value(self, ctrl: Dict[str, Any], ref: int) -> Optional[bool]:
+        for section in ("points", "gears", "extra"):
+            vals = (ctrl or {}).get(section) or {}
+            if not isinstance(vals, dict):
+                continue
+            v = vals.get(str(ref))
+            if v is None and ref in vals:
+                v = vals.get(ref)
+            if v is not None:
+                return bool(v)
+        return None
+
+    def _collect_bits(self) -> Dict[int, bool]:
+        snap = self.state.snapshot()
+        out: Dict[int, bool] = {}
+        ctrls = snap.get("controllers", {}) or {}
+        if self._ref_map:
+            for (ctrl_name, ref), addr in self._ref_map.items():
+                ctrl = ctrls.get(ctrl_name) or {}
+                v = self._lookup_ref_value(ctrl, ref)
+                if v is not None:
+                    out[int(addr)] = v
+            return out
+        for _ctrl_name, ctrl in ctrls.items():
+            for section in ("points", "gears", "extra"):
+                vals = (ctrl or {}).get(section) or {}
+                if not isinstance(vals, dict):
+                    continue
+                for ref_str, v in vals.items():
+                    if v is None:
+                        continue
+                    try:
+                        ref = int(ref_str)
+                    except Exception:
+                        continue
+                    out[ref] = bool(v)
+        return out
+
+    async def _refresher(self) -> None:
+        loop = asyncio.get_running_loop()
+        while not self._stop_event.is_set():
+            try:
+                # Prefer event-driven updates, but wake up periodically too.
+                await loop.run_in_executor(None, self.state.update_event.wait, self.refresh_sec)
+            finally:
+                self.state.update_event.clear()
+            try:
+                bits = self._collect_bits()
+                if bits:
+                    self._publish_bits(bits)
+            except Exception as e:
+                self.logger.warning("DI mirror refresh failed: %s", e)
+
+    async def _run_async(self) -> None:
+        refresher = asyncio.create_task(self._refresher())
+        try:
+            await StartAsyncTcpServer(
+                context=self._context,
+                identity=self._identity,
+                address=(self.bind_host, self.port),
+            )
+        finally:
+            self._stop_event.set()
+            self.state.update_event.set()
+            refresher.cancel()
+            try:
+                await refresher
+            except asyncio.CancelledError:
+                pass
+
+    def _thread_main(self) -> None:
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        try:
+            self.logger.info("Starting DI mirror Modbus/TCP on %s:%s unit=%s", self.bind_host, self.port, self.unit_id)
+            self._loop.run_until_complete(self._run_async())
+        except OSError as e:
+            self.logger.error("DI mirror Modbus/TCP bind failed on %s:%s (%s)", self.bind_host, self.port, e)
+        except Exception as e:
+            self.logger.error("DI mirror server stopped (%s)", e)
+        finally:
+            try:
+                self._loop.close()
+            except Exception:
+                pass
 
 
 class ConnectionGuard:
@@ -127,6 +347,7 @@ class PointCfg:
     label: str
     invert: bool = False
     style: Optional[str] = None
+    passthrough: Optional[str] = None
 
 
 @dataclass
@@ -137,7 +358,18 @@ class ControllerCfg:
     points: List[PointCfg] = field(default_factory=list)
     gear_points: Dict[int, str] = field(default_factory=dict)
     extra_points: Dict[int, str] = field(default_factory=dict)
+    passthrough_gears: Dict[int, str] = field(default_factory=dict)
+    passthrough_extra: Dict[int, str] = field(default_factory=dict)
     model: Optional[str] = None
+
+
+@dataclass
+class PassthroughCfg:
+    enabled: bool = False
+    bind: str = "0.0.0.0"
+    port: int = 502
+    unit_id: int = 1
+    groups: Dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -189,6 +421,7 @@ def derive_short_vehicle_name(name: str) -> str:
 class AppCfg:
     port: int = DEFAULT_MODBUS_PORT
     timeout: float = DEFAULT_TIMEOUT
+    poll_interval_sec: float = DEFAULT_POLL_INTERVAL_SEC
     unit_candidates: List[int] = field(default_factory=lambda: DEFAULT_UNIT_CANDIDATES[:])
     coils_fallback: bool = DEFAULT_COILS_FALLBACK
     gnss_host: Optional[str] = None
@@ -203,7 +436,7 @@ class AppCfg:
     full_log_dir: str = "logs/full"
     full_log_snapshot_interval_sec: float = 1.0
     full_log_rotate_bytes: int = 5 * 1024 * 1024
-    # HTTP upload (chunked, resumable)
+    # HTTP upload (compressed whole-file transfer)
     upload_enabled: bool = False
     upload_url: Optional[str] = None
     upload_device_id: Optional[str] = None
@@ -211,6 +444,31 @@ class AppCfg:
     upload_state_file: str = "logs/upload_state.json"
     display_latency_hosts: List[Tuple[str, str, int]] = field(default_factory=list)
     vehicles: List[VehicleCfg] = field(default_factory=list)
+    passthrough: PassthroughCfg = field(default_factory=PassthroughCfg)
+
+
+def build_passthrough_ref_map(vehicle: VehicleCfg, groups: Dict[str, int]) -> Dict[Tuple[str, int], int]:
+    """Map (controller name, source ref) -> unified passthrough DI address."""
+    out: Dict[Tuple[str, int], int] = {}
+    if not groups:
+        return out
+    for ctrl in vehicle.controllers:
+        cname = ctrl.name
+        for p in ctrl.points:
+            if not p.passthrough:
+                continue
+            addr = groups.get(p.passthrough)
+            if addr is not None:
+                out[(cname, p.ref)] = int(addr)
+        for ref, group in ctrl.passthrough_gears.items():
+            addr = groups.get(group)
+            if addr is not None:
+                out[(cname, int(ref))] = int(addr)
+        for ref, group in ctrl.passthrough_extra.items():
+            addr = groups.get(group)
+            if addr is not None:
+                out[(cname, int(ref))] = int(addr)
+    return out
 
 
 def infer_style(label: str, explicit: Optional[str]) -> str:
@@ -541,6 +799,9 @@ class FullFidelityLogger:
         if self.thread:
             self.thread.join(timeout=2)
 
+    def current_segment_path(self) -> Optional[Path]:
+        return self._current_path
+
     def enqueue(self, record: Dict[str, Any]) -> None:
         if not self.enabled:
             return
@@ -730,10 +991,10 @@ class FullFidelityLogger:
 
 class HttpLogUploader:
     """
-    Chunked, resumable HTTP uploader for full-fidelity logs.
+    Whole-file HTTP uploader for compressed full-fidelity logs.
 
-    - Uploads newline-aligned byte ranges from segment files under `base_dir`.
-    - Persists per-file byte offsets in `state_file` so it can resume on restart.
+    - Compresses inactive `segment_*.jsonl` files to `segment_*.jsonl.gz`.
+    - Uploads complete gzip files and marks each file complete after HTTP success.
     """
 
     def __init__(
@@ -747,6 +1008,7 @@ class HttpLogUploader:
         state_file: str,
         vehicle: str,
         vehicle_short: str,
+        active_segment_getter: Optional[Any] = None,
     ):
         self.enabled = bool(enabled)
         self.base_dir = str(base_dir or "logs/full")
@@ -756,11 +1018,12 @@ class HttpLogUploader:
         self.state_file = Path(state_file or "logs/upload_state.json").expanduser()
         self.vehicle = str(vehicle or "")
         self.vehicle_short = str(vehicle_short or "")
+        self.active_segment_getter = active_segment_getter
         self.stop_event = threading.Event()
         self.thread: Optional[threading.Thread] = None
         self.last_error: Optional[str] = None
         self._lock = threading.Lock()
-        self._state: Dict[str, Any] = {"v": 1, "files": {}}
+        self._state: Dict[str, Any] = {"v": 2, "uploaded": {}, "files": {}}
 
     def start(self) -> None:
         if not self.enabled or not self.url:
@@ -798,10 +1061,25 @@ class HttpLogUploader:
         base = Path(self.base_dir).expanduser()
         if not base.exists():
             return []
-        # Only upload JSONL segments, never wifilogs.
+        return sorted(base.rglob(f"segment_*{FULL_LOG_COMPRESSED_SUFFIX}"), key=lambda p: (str(p.parent), p.name))
+
+    def _active_segment(self) -> Optional[Path]:
+        getter = self.active_segment_getter
+        if getter is None:
+            return None
+        try:
+            active = getter()
+            return Path(active).expanduser().resolve() if active else None
+        except Exception:
+            return None
+
+    def _list_uncompressed_segments(self) -> List[Path]:
+        base = Path(self.base_dir).expanduser()
+        if not base.exists():
+            return []
         return sorted(base.rglob("segment_*.jsonl"), key=lambda p: (str(p.parent), p.name))
 
-    def _get_offset(self, path: Path) -> int:
+    def _legacy_offset(self, path: Path) -> int:
         with self._lock:
             files = self._state.setdefault("files", {})
             try:
@@ -809,49 +1087,95 @@ class HttpLogUploader:
             except Exception:
                 return 0
 
-    def _set_offset(self, path: Path, offset: int) -> None:
+    def _mark_uploaded(self, path: Path) -> None:
+        try:
+            st = path.stat()
+            entry = {"size": int(st.st_size), "mtime": float(st.st_mtime)}
+        except OSError:
+            entry = {"size": 0, "mtime": 0.0}
         with self._lock:
-            files = self._state.setdefault("files", {})
-            files[str(path)] = int(max(0, offset))
+            uploaded = self._state.setdefault("uploaded", {})
+            uploaded[str(path)] = entry
 
-    def _read_chunk_newline_aligned(self, path: Path, start: int) -> Tuple[bytes, int]:
-        """
-        Returns (payload_bytes, end_offset_exclusive).
-        End offset is advanced to the end of a line (newline included) when possible.
-        """
-        st = path.stat()
-        size = int(st.st_size)
-        if start >= size:
-            return b"", start
-        end_target = min(size, start + self.chunk_bytes)
+    def _is_uploaded(self, path: Path) -> bool:
+        try:
+            st = path.stat()
+            size = int(st.st_size)
+            mtime = float(st.st_mtime)
+        except OSError:
+            return False
+        with self._lock:
+            entry = self._state.setdefault("uploaded", {}).get(str(path))
+        if entry is True:
+            return True
+        if isinstance(entry, dict):
+            try:
+                return int(entry.get("size", -1)) == size and abs(float(entry.get("mtime", -1.0)) - mtime) < 0.001
+            except Exception:
+                return False
+        return False
+
+    def _compress_segment(self, path: Path) -> Optional[Path]:
+        if path.name.endswith(FULL_LOG_COMPRESSED_SUFFIX):
+            return path
+        try:
+            resolved = path.expanduser().resolve()
+            active = self._active_segment()
+            if active is not None and resolved == active:
+                return None
+            st = path.stat()
+            if st.st_size <= 0:
+                return None
+            # Avoid racing the logger before it has published its active path.
+            if time.time() - float(st.st_mtime) < 2.0:
+                return None
+            gz_path = path.with_name(path.name + ".gz")
+            tmp_path = gz_path.with_suffix(gz_path.suffix + ".tmp")
+            legacy_fully_uploaded = self._legacy_offset(path) >= int(st.st_size)
+            with path.open("rb") as src, gzip.open(tmp_path, "wb", compresslevel=6) as dst:
+                while True:
+                    chunk = src.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    dst.write(chunk)
+            tmp_path.replace(gz_path)
+            path.unlink()
+            if legacy_fully_uploaded:
+                self._mark_uploaded(gz_path)
+            return gz_path
+        except OSError as e:
+            self.last_error = str(e)
+            return None
+
+    def _compress_backlog(self) -> None:
+        for path in self._list_uncompressed_segments():
+            if self.stop_event.is_set():
+                break
+            self._compress_segment(path)
+
+    def _sha256_file(self, path: Path) -> str:
+        h = hashlib.sha256()
         with path.open("rb") as fh:
-            fh.seek(start)
-            data = fh.read(end_target - start)
-            if not data:
-                return b"", start
-            end = start + len(data)
-            if end < size and not data.endswith(b"\n"):
-                # Extend to the next newline, with a small cap to avoid huge lines.
-                extra = fh.read(64 * 1024)
-                if extra:
-                    nl = extra.find(b"\n")
-                    if nl >= 0:
-                        data += extra[: nl + 1]
-                        end += nl + 1
-        return data, end
+            while True:
+                data = fh.read(1024 * 1024)
+                if not data:
+                    break
+                h.update(data)
+        return h.hexdigest()
 
-    def _post_chunk(self, segment: Path, start: int, end: int, payload: bytes) -> None:
+    def _post_file(self, segment: Path) -> None:
         assert self.url is not None
+        payload = segment.read_bytes()
         req = urllib.request.Request(self.url, method="POST", data=payload)
-        req.add_header("Content-Type", "application/x-ndjson")
+        req.add_header("Content-Type", "application/gzip")
+        req.add_header("X-Log-Compression", "gzip")
         req.add_header("X-Schema-Version", str(FULL_LOG_SCHEMA_VERSION))
         req.add_header("X-Device-Id", self.device_id)
         req.add_header("X-Vehicle", self.vehicle)
         req.add_header("X-Vehicle-Short", self.vehicle_short)
         req.add_header("X-Log-Segment", segment.name)
-        req.add_header("X-Chunk-Start", str(start))
-        req.add_header("X-Chunk-End", str(end))
-        req.add_header("X-Chunk-Bytes", str(len(payload)))
+        req.add_header("X-File-Bytes", str(len(payload)))
+        req.add_header("X-File-Sha256", self._sha256_file(segment))
         with urllib.request.urlopen(req, timeout=10) as resp:
             code = int(getattr(resp, "status", 200))
             if code < 200 or code >= 300:
@@ -862,19 +1186,19 @@ class HttpLogUploader:
         while not self.stop_event.is_set():
             try:
                 did_work = False
+                self._compress_backlog()
                 for p in self._list_segments():
                     if self.stop_event.is_set():
                         break
                     try:
-                        off = self._get_offset(p)
-                        payload, end = self._read_chunk_newline_aligned(p, off)
-                        if not payload:
+                        if self._is_uploaded(p):
                             continue
-                        self._post_chunk(p, off, end, payload)
-                        self._set_offset(p, end)
+                        self._post_file(p)
+                        self._mark_uploaded(p)
                         did_work = True
                         backoff = 0.5
-                        # Persist progress frequently so crashes don't re-upload too much.
+                        self.last_error = None
+                        # Persist after every confirmed file so retries stay per-file.
                         self._save_state()
                     except (OSError, urllib.error.URLError, urllib.error.HTTPError, RuntimeError) as e:
                         self.last_error = str(e)
@@ -1102,13 +1426,28 @@ def _as_int_keys(d: Dict[str, Any]) -> Dict[int, str]:
     return out
 
 
+def _as_positive_float(value: Any, default: float) -> float:
+    try:
+        parsed = float(value)
+        if parsed > 0:
+            return parsed
+    except Exception:
+        pass
+    return float(default)
+
+
 def load_config(path: str) -> AppCfg:
     with open(path, "r", encoding="utf-8") as f:
         raw = json.load(f)
-    modbus_port = int(raw.get("pymodbus", {}).get("port", DEFAULT_MODBUS_PORT))
-    timeout = float(raw.get("pymodbus", {}).get("timeout", DEFAULT_TIMEOUT))
-    unit_candidates = list(raw.get("pymodbus", {}).get("unitCandidates", DEFAULT_UNIT_CANDIDATES))
-    coils_fallback = bool(raw.get("pymodbus", {}).get("coilsFallback", DEFAULT_COILS_FALLBACK))
+    modbus_cfg = raw.get("pymodbus", {}) or {}
+    modbus_port = int(modbus_cfg.get("port", DEFAULT_MODBUS_PORT))
+    timeout = float(modbus_cfg.get("timeout", DEFAULT_TIMEOUT))
+    poll_interval_sec = _as_positive_float(
+        modbus_cfg.get("pollIntervalSec", modbus_cfg.get("pollInterval", modbus_cfg.get("pollSeconds"))),
+        DEFAULT_POLL_INTERVAL_SEC,
+    )
+    unit_candidates = list(modbus_cfg.get("unitCandidates", DEFAULT_UNIT_CANDIDATES))
+    coils_fallback = bool(modbus_cfg.get("coilsFallback", DEFAULT_COILS_FALLBACK))
     gnss_cfg = raw.get("gnss", {}) or {}
     wifi_cfg = raw.get("wifi", {}) or {}
     display_cfg = raw.get("display", {}) or {}
@@ -1132,7 +1471,16 @@ def load_config(path: str) -> AppCfg:
         v_name = str(v.get("name", "vehicle"))
         ctrls: List[ControllerCfg] = []
         for c in v.get("controllers", []):
-            points = [PointCfg(ref=int(p["ref"]), label=str(p["label"]), invert=bool(p.get("invert", False)), style=p.get("style")) for p in c.get("points", [])]
+            points = [
+                PointCfg(
+                    ref=int(p["ref"]),
+                    label=str(p["label"]),
+                    invert=bool(p.get("invert", False)),
+                    style=p.get("style"),
+                    passthrough=str(p["passthrough"]).strip() if p.get("passthrough") else None,
+                )
+                for p in c.get("points", [])
+            ]
             ctrls.append(
                 ControllerCfg(
                     name=str(c.get("name", c.get("host", "ctrl"))),
@@ -1141,6 +1489,8 @@ def load_config(path: str) -> AppCfg:
                     points=points,
                     gear_points=_as_int_keys(c.get("gear_points", {})),
                     extra_points=_as_int_keys(c.get("extra_points", {})),
+                    passthrough_gears=_as_int_keys(c.get("passthrough_gears", {})),
+                    passthrough_extra=_as_int_keys(c.get("passthrough_extra", {})),
                     model=c.get("model"),
                 )
             )
@@ -1251,9 +1601,18 @@ def load_config(path: str) -> AppCfg:
         except Exception:
             return float(default)
 
+    pt_raw = raw.get("passthrough", {}) or {}
+    pt_groups: Dict[str, int] = {}
+    for k, v in (pt_raw.get("groups", {}) or {}).items():
+        try:
+            pt_groups[str(k)] = int(v)
+        except Exception:
+            continue
+
     return AppCfg(
         port=modbus_port,
         timeout=timeout,
+        poll_interval_sec=poll_interval_sec,
         unit_candidates=unit_candidates,
         coils_fallback=coils_fallback,
         gnss_host=str(gnss_cfg.get("host")) if gnss_cfg.get("host") else None,
@@ -1274,12 +1633,25 @@ def load_config(path: str) -> AppCfg:
         upload_state_file=str(upload_cfg.get("stateFile") or upload_cfg.get("state_file") or "logs/upload_state.json"),
         display_latency_hosts=latency_hosts,
         vehicles=vehicles,
+        passthrough=PassthroughCfg(
+            enabled=_as_bool(pt_raw.get("enabled"), False),
+            bind=str(pt_raw.get("bind") or pt_raw.get("host") or "0.0.0.0"),
+            port=_as_int(pt_raw.get("port"), 502),
+            unit_id=_as_int(pt_raw.get("unitId") or pt_raw.get("unit_id"), 1),
+            groups=pt_groups,
+        ),
     )
 
 
 def write_default_config(path: str) -> None:
     default = {
-        "pymodbus": {"port": DEFAULT_MODBUS_PORT, "timeout": DEFAULT_TIMEOUT, "unitCandidates": DEFAULT_UNIT_CANDIDATES, "coilsFallback": DEFAULT_COILS_FALLBACK},
+        "pymodbus": {
+            "port": DEFAULT_MODBUS_PORT,
+            "timeout": DEFAULT_TIMEOUT,
+            "pollIntervalSec": DEFAULT_POLL_INTERVAL_SEC,
+            "unitCandidates": DEFAULT_UNIT_CANDIDATES,
+            "coilsFallback": DEFAULT_COILS_FALLBACK,
+        },
         "gnss": {"host": "192.168.1.50", "port": 2947},
         "wifi": {"interface": "wlp2s0", "refreshSeconds": 2, "detailedLogFile": "wifilogs"},
         "logging": {
@@ -1738,18 +2110,21 @@ def apply_bssid_transition_timing(
 
 
 def call_bits(method, address: int, count: int, unit: int):
-    try:
-        return method(address, count=count, slave=unit), None
-    except TypeError as e1:
+    attempts = (
+        ("device_id", lambda: method(address, count=count, device_id=unit)),
+        ("slave", lambda: method(address, count=count, slave=unit)),
+        ("unit", lambda: method(address, count=count, unit=unit)),
+        ("default", lambda: method(address, count=count)),
+    )
+    errors: List[str] = []
+    for label, call in attempts:
         try:
-            return method(address, count=count, unit=unit), None
-        except TypeError as e2:
-            try:
-                return method(address, count=count), None
-            except Exception as e3:
-                return None, f"kw variants failed: slave({e1}); unit({e2}); no-unit({e3.__class__.__name__}: {e3})"
-    except Exception as e:
-        return None, f"call error: {e.__class__.__name__}: {e}"
+            return call(), None
+        except TypeError as e:
+            errors.append(f"{label}({e})")
+        except Exception as e:
+            return None, f"{label} call error: {e.__class__.__name__}: {e}"
+    return None, "kw variants failed: " + "; ".join(errors)
 
 
 def call_write_coil(method, address: int, value: bool, unit: int):
@@ -2032,6 +2407,8 @@ class Poller:
         self.debug_msgs: Dict[str, str] = {}
         self.last_net_check_time = 0.0
         self.last_wifi_check_time = 0.0
+        self.last_system_check_time = 0.0
+        self.system_refresh_interval = 1.0
         self._tcp_check_lock = threading.Lock()
         self._tcp_check_inflight = False
         self.gnss_client: Optional[GNSSClient] = None
@@ -2045,7 +2422,8 @@ class Poller:
         self.last_scan_candidates: Dict[str, Optional[float]] = {"candidate_count": None, "top_candidate_rssi": None}
         self.signal_window: deque = deque(maxlen=24)
         self.last_reason_code: Optional[int] = None
-        self.wifi_refresh_interval = self.appcfg.wifi_refresh if self.appcfg.wifi_refresh is not None else self.args.poll * 2
+        self.poll_interval = _as_positive_float(getattr(self.args, "poll", None), DEFAULT_POLL_INTERVAL_SEC)
+        self.wifi_refresh_interval = self.appcfg.wifi_refresh if self.appcfg.wifi_refresh is not None else self.poll_interval * 2
         self.poll_net_interval = self.args.poll_net
         self._reconnect_times = deque()  # monotonic timestamps
         self._build_clients()
@@ -2371,17 +2749,25 @@ class Poller:
             self.last_wifi_check_time = now
         if self.gnss_client:
             self.state.set_gnss(self.gnss_client.snapshot())
-        self.state.set_cpu_load(get_cpu_load())
-        self.state.set_cpu_temp(get_soc_temp_c())
+        if now - self.last_system_check_time >= self.system_refresh_interval:
+            self.state.set_cpu_load(get_cpu_load())
+            self.state.set_cpu_temp(get_soc_temp_c())
+            self.last_system_check_time = now
 
     def start(self):
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
 
     def _loop(self):
+        interval = self.poll_interval
+        next_deadline = time.monotonic()
         while not self.stop_event.is_set():
             self.run_once()
-            if self.stop_event.wait(self.args.poll):
+            next_deadline += interval
+            now = time.monotonic()
+            if next_deadline <= now:
+                next_deadline = now + interval
+            if self.stop_event.wait(max(0.0, next_deadline - now)):
                 break
 
     def stop(self):

@@ -1,0 +1,23 @@
+[Unit]
+Description=oati-ts-monitor log collector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=oati-ts-monitor
+Group=oati-ts-monitor
+WorkingDirectory=/var/lib/oati-ts-monitor
+ExecStart=/usr/bin/oati-ts-monitor-log-collector \
+  --bind 0.0.0.0 \
+  --port 9000 \
+  --data-dir /var/lib/oati-ts-monitor/received_logs
+
+Restart=always
+RestartSec=2
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -24,7 +24,7 @@ The daemon keeps polling until you stop it (Ctrl+C or systemd stop).
 Run the Modbus polling loop:
 - `--config` path to `monitor_config.json` (default `monitor_config.json`)
 - `--vehicle` select vehicle by name or index (1-based)
-- `--poll` polling interval seconds (default `1.0`)
+- `--poll` polling interval seconds (default from `pymodbus.pollIntervalSec`)
 - `--poll-net` TCP reachability / latency check interval seconds (default: same as `--poll`)
 - `--port` Modbus TCP port override (default from config)
 - `--timeout` socket timeout seconds (default from config)
@@ -41,11 +41,11 @@ Optional services:
 - `--full-log-dir` base directory for full logs (default from config or `logs/full`)
 - `--full-log-interval` full snapshot interval seconds (default from config)
 - `--full-log-rotate-bytes` rotate segment after N bytes (default from config)
-- `--upload` enable background HTTP upload of full logs (chunked, resumable)
-- `--upload-url` collector endpoint for chunk uploads
+- `--upload` enable background HTTP upload of compressed full log files
+- `--upload-url` collector endpoint for file uploads
 - `--upload-device-id` device identifier to include in upload headers
-- `--upload-chunk-bytes` chunk size in bytes
-- `--upload-state-file` upload cursor state JSON path
+- `--upload-chunk-bytes` deprecated; uploads now send one compressed file at a time
+- `--upload-state-file` upload file state JSON path
 
 IPC (client communication):
 - `--ipc-bind` (default `127.0.0.1`) and `--ipc-port` (default `9102`)
@@ -57,7 +57,21 @@ python client.py status
 python client.py health
 python client.py watch
 python client.py tui
+python -m passthrough_viewer --vehicle segway_villain
 ```
+
+### Passthrough Modbus viewer
+
+When the daemon exposes the passthrough DI mirror (`passthrough.enabled` or `--mirror-di`), you can read the unified discrete-input addresses directly over Modbus/TCP:
+
+```bash
+python -m passthrough_viewer --host 127.0.0.1 --vehicle segway_villain
+python -m passthrough_viewer --watch --interval 0.5
+python -m passthrough_viewer --watch --interval 0.5 --json
+python -m passthrough_viewer --group handbrake --group seatbelt
+```
+
+Defaults come from `monitor_config.json` (`passthrough.port`, `passthrough.unitId`, `pymodbus.timeout`). Use `--vehicle` to show which controller/ref feeds each passthrough group for that vehicle.
 
 Notes:
 - The client connects to the daemon via `--ipc-host`/`--ipc-port` (defaults: `127.0.0.1:9102`).
@@ -109,9 +123,37 @@ python monitor.py client tui
 
 Legacy single-process mode still works when no subcommand is passed.
 
+## Debian package
+
+Build a `.deb` on Linux:
+
+```bash
+./scripts/build-deb.sh
+```
+
+On macOS (Docker required):
+
+```bash
+./scripts/build-deb.sh --docker
+```
+
+Install on the target host:
+
+```bash
+sudo dpkg -i ../oati-ts-monitor_1.0.0-1_all.deb
+sudo apt-get install -f   # if dependencies are missing
+sudo systemctl enable --now oati-ts-monitor.service
+```
+
+Installed layout:
+- Binaries: `oati-ts-monitor-daemon`, `oati-ts-monitor-client`, `oati-ts-monitor-log-collector`, `oati-ts-monitor-wifilog-viewer`, `oati-ts-monitor-passthrough-viewer`
+- Application: `/usr/lib/oati-ts-monitor/`
+- Config (editable): `/etc/oati-ts-monitor/monitor_config.json`
+- State/logs: `/var/lib/oati-ts-monitor/`, `/var/log/oati-ts-monitor/`
+
 ## Systemd service
 
-This repo includes a daemon-only unit template: `oati-ts-monitor-daemon.service`.
+This repo includes a daemon-only unit template: `oati-ts-monitor-daemon.service` (for manual installs). The Debian package installs `oati-ts-monitor.service` with FHS paths.
 
 Before enabling it, replace the placeholders in the unit file:
 - `WorkingDirectory=/PATH/TO/oati-ts-monitor`
@@ -131,6 +173,32 @@ Watch logs:
 journalctl -u oati-ts-monitor-daemon.service -f
 ```
 
+## Log collector
+
+Run the collector directly from a checkout:
+
+```bash
+python3 -m pip install -r log_collector/requirements.txt
+python3 -m log_collector --bind 0.0.0.0 --port 9000 --data-dir ./received_logs
+```
+
+With the Debian package installed, run it with systemd:
+
+```bash
+sudo systemctl enable --now oati-ts-monitor-log-collector.service
+journalctl -u oati-ts-monitor-log-collector.service -f
+```
+
+For a manual systemd install, copy the included unit first:
+
+```bash
+sudo cp oati-ts-monitor-log-collector.service /etc/systemd/system/oati-ts-monitor-log-collector.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now oati-ts-monitor-log-collector.service
+```
+
+The collector listens at `http://<host>:9000/ingest` and shows its dashboard at `http://<host>:9000/`.
+
 ## `monitor_config.json` documentation
 
 The daemon/client use a single JSON config file (default: `monitor_config.json`). Key top-level sections:
@@ -138,6 +206,7 @@ The daemon/client use a single JSON config file (default: `monitor_config.json`)
 - `pymodbus`
   - `port` (int): Modbus TCP port (default `502`)
   - `timeout` (number): TCP timeout seconds (default `2.5`)
+  - `pollIntervalSec` (number): Modbus polling interval seconds; `0.05` gives a 20Hz tick rate when the controller read pass completes within 50ms
   - `unitCandidates` (int array): Modbus unit IDs to probe (default `1,255,0`)
   - `coilsFallback` (boolean): if `true`, fall back to Modbus coils (FC1) when discrete inputs fail (FC2)
 - `gnss` (optional)

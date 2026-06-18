@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>App Logs</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #0b1e24; color: #e8f1f2; margin: 0; padding: 0; }
+    header { background: #12313b; padding: 12px 16px; font-size: 20px; position: sticky; top: 0; z-index: 1000; border-bottom: 1px solid #1c3a43; }
+    main { padding: 16px; }
+    a { color: #9ad1d4; }
+    .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 10px 0 14px; }
+    .field { display: flex; gap: 6px; align-items: center; font-size: 13px; }
+    .field label { opacity: 0.9; }
+    .field input {
+      background: #07161b; color: #e8f1f2; border: 1px solid #1c3a43; border-radius: 6px;
+      padding: 6px 8px; font-size: 13px;
+    }
+    .btn {
+      display: inline-block; background: #1c3a43; border: 1px solid #2b5662; color: #e8f1f2;
+      padding: 6px 10px; border-radius: 6px; text-decoration: none; cursor: pointer;
+    }
+    .btn:hover { background: #244a55; }
+    .logbox {
+      background: #07161b;
+      border: 1px solid #1c3a43;
+      border-radius: 8px;
+      padding: 10px;
+      height: 70vh;
+      overflow: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 12px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .muted { opacity: 0.85; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <header>
+    App Logs
+    <a href="/" style="margin-left: 12px;">Dashboard</a>
+    <a href="/combined" style="margin-left: 12px;">Combined graph</a>
+    <a href="/wifilogs" style="margin-left: 12px;">WiFi logs</a>
+  </header>
+  <main>
+    <div class="muted">Live tail (last 50 lines, auto-updating).</div>
+    <div class="toolbar">
+      <div class="field">
+        <label for="filter">Filter</label>
+        <input id="filter" type="text" placeholder="substring (case-insensitive)" style="width: 320px;" />
+      </div>
+      <button id="toggleFollow" class="btn" type="button">Follow: ON</button>
+      <button id="clear" class="btn" type="button">Clear</button>
+    </div>
+    <div id="logbox" class="logbox" role="log" aria-live="polite"></div>
+  </main>
+  <script>
+    const payload = {{ initial_state | safe }};
+    const initialLines = Array.isArray(payload?.logs) ? payload.logs : [];
+    const logbox = document.getElementById('logbox');
+    const filterEl = document.getElementById('filter');
+    const toggleFollowEl = document.getElementById('toggleFollow');
+    const clearEl = document.getElementById('clear');
+    let follow = true;
+    let ws = null;
+    let buffer = initialLines.slice(-500).map((x) => x?.line || '').filter(Boolean);
+
+    function shouldFollow() {
+      if (!follow) return false;
+      // Only auto-scroll if user is near bottom.
+      const nearBottom = (logbox.scrollTop + logbox.clientHeight) >= (logbox.scrollHeight - 40);
+      return nearBottom;
+    }
+
+    function applyFilter(lines) {
+      const q = (filterEl.value || '').trim().toLowerCase();
+      if (!q) return lines;
+      return lines.filter((l) => String(l).toLowerCase().includes(q));
+    }
+
+    function render() {
+      const before = shouldFollow();
+      const lines = applyFilter(buffer);
+      logbox.textContent = lines.join('\n');
+      if (before) logbox.scrollTop = logbox.scrollHeight;
+    }
+
+    function connect() {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      ws = new WebSocket(`${proto}://${location.host}/wslogs`);
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data || '{}');
+          const lines = msg?.data?.lines;
+          if (msg?.type === 'log_init' && Array.isArray(lines)) {
+            buffer = lines.map((x) => x?.line || '').filter(Boolean);
+            render();
+            return;
+          }
+          if (msg?.type === 'log' && Array.isArray(lines)) {
+            for (const item of lines) {
+              const line = item?.line;
+              if (typeof line === 'string' && line.length) buffer.push(line);
+            }
+            if (buffer.length > 5000) buffer = buffer.slice(buffer.length - 5000);
+            render();
+          }
+        } catch (_e) {}
+      };
+      ws.onclose = () => setTimeout(connect, 1500);
+    }
+
+    toggleFollowEl.onclick = () => {
+      follow = !follow;
+      toggleFollowEl.textContent = `Follow: ${follow ? 'ON' : 'OFF'}`;
+      if (follow) { logbox.scrollTop = logbox.scrollHeight; }
+    };
+    clearEl.onclick = () => { buffer = []; render(); };
+    filterEl.addEventListener('input', () => render());
+
+    render();
+    connect();
+  </script>
+</body>
+</html>
+
