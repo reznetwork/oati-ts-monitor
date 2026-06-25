@@ -9,6 +9,53 @@ from typing import Any, Dict, Optional, Set, Tuple
 from ipc_protocol import decode_message, encode_message
 
 
+def _startup_indicator_blink(poller: Any) -> None:
+    """
+    Startup indicator for service mode:
+    MB_IO_1 coils (0,1) toggle sequence 10 -> 11 -> 01 -> 00, repeated 3 times.
+    """
+
+    def _get_client():
+        try:
+            clients = getattr(poller, "clients", None) or {}
+            return clients.get("MB_IO_1")
+        except Exception:
+            return None
+
+    client = _get_client()
+    if client is None:
+        return
+
+    # Visible blink cadence; keep short to avoid slowing startup.
+    step_sleep_sec = 0.25
+    max_total_sec = 15.0
+    start = time.monotonic()
+
+    seq = [(True, False), (True, True), (False, True), (False, False)]
+
+    # Give poller a moment to initialize (especially right after service start).
+    time.sleep(0.4)
+
+    for _ in range(3):
+        for c0, c1 in seq:
+            if time.monotonic() - start > max_total_sec:
+                return
+            ok0 = client.write_coil(0, c0)
+            ok1 = client.write_coil(1, c1)
+            # If Modbus isn't reachable yet, don't spin; wait a bit and keep going.
+            if not (ok0 and ok1):
+                time.sleep(1.0)
+            else:
+                time.sleep(step_sleep_sec)
+
+    # Ensure off at the end.
+    try:
+        client.write_coil(0, False)
+        client.write_coil(1, False)
+    except Exception:
+        pass
+
+
 class SocketIpcServer:
     def __init__(self, state: Any, poller: Any, host: str, port: int):
         self.state = state
@@ -235,6 +282,7 @@ def run_daemon(args: argparse.Namespace) -> int:
     bridge = IOBridgeEvaluator(vehicle.bridge_mappings) if getattr(vehicle, "bridge_mappings", None) else None
     poller = Poller(args, appcfg, vehicle, state, bridge=bridge)
     poller.start()
+    threading.Thread(target=_startup_indicator_blink, args=(poller,), daemon=True).start()
     datalogger = DataLogger(state, vehicle, args.log_file, args.log_interval)
     datalogger.start()
 
