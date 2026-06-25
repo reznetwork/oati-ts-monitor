@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Build passthrough_map.xlsx from monitor_config.json (stdlib only)."""
+"""Build passthrough_map.xlsx or passthrough_map.json from monitor_config.json (stdlib only)."""
 from __future__ import annotations
 
+import argparse
 import json
 import zipfile
 from collections import defaultdict
@@ -10,7 +11,8 @@ from xml.sax.saxutils import escape
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG = ROOT / "monitor_config.json"
-OUTPUT = ROOT / "passthrough_map.xlsx"
+DEFAULT_XLSX = ROOT / "passthrough_map.xlsx"
+DEFAULT_JSON = ROOT / "passthrough_map.json"
 
 
 def col_letter(n: int) -> str:
@@ -21,37 +23,88 @@ def col_letter(n: int) -> str:
     return s
 
 
-def build_rows(cfg: dict) -> list[list[str]]:
+def collect_descriptions(cfg: dict) -> dict[str, str]:
+    labels: dict[str, set[str]] = defaultdict(set)
+
+    for v in cfg["vehicles"]:
+        for c in v.get("controllers", []):
+            gear_pts = c.get("gear_points") or {}
+            for p in c.get("points", []):
+                g = p.get("passthrough")
+                if g and p.get("label"):
+                    labels[g].add(str(p["label"]).strip())
+            for ref_s, g in (c.get("passthrough_gears") or {}).items():
+                gear = gear_pts.get(ref_s) or gear_pts.get(str(ref_s))
+                if gear:
+                    labels[g].add(f"Gear {gear}")
+            extra_pts = c.get("extra_points") or {}
+            for ref_s, g in (c.get("passthrough_extra") or {}).items():
+                extra = extra_pts.get(ref_s) or extra_pts.get(str(ref_s))
+                if extra:
+                    labels[g].add(str(extra))
+
+    descriptions: dict[str, str] = {}
+    for group in cfg["passthrough"]["groups"]:
+        if labels[group]:
+            descriptions[group] = " / ".join(sorted(labels[group]))
+        else:
+            descriptions[group] = group.replace(":", " ").replace("_", " ")
+    return descriptions
+
+
+def build_map(cfg: dict) -> dict:
     groups = cfg["passthrough"]["groups"]
-    cols_sorted = sorted(groups.items(), key=lambda x: (x[1], x[0]))
-    matrix: dict[str, dict[str, str]] = defaultdict(dict)
-    vehicles: list[tuple[str, str]] = []
+    function_order = [group for group, _addr in sorted(groups.items(), key=lambda x: (x[1], x[0]))]
+    group_addrs = dict(groups.items())
+    vehicle_order: list[str] = []
+    vehicles: dict[str, dict[str, int]] = {}
 
     for v in cfg["vehicles"]:
         sn = v.get("shortName") or v["name"]
-        vehicles.append((sn, str(v.get("name", sn))))
+        vehicle_order.append(sn)
+        per_vehicle: dict[str, int] = {}
         for c in v.get("controllers", []):
-            cname = c["name"]
             for p in c.get("points", []):
                 g = p.get("passthrough")
-                if g:
-                    matrix[sn][g] = f"{cname} / ref {p['ref']}"
-            for ref_s, g in (c.get("passthrough_gears") or {}).items():
-                matrix[sn][g] = f"{cname} / ref {ref_s}"
-            for ref_s, g in (c.get("passthrough_extra") or {}).items():
-                matrix[sn][g] = f"{cname} / ref {ref_s}"
+                if g and g in group_addrs:
+                    per_vehicle[g] = group_addrs[g]
+            for _ref_s, g in (c.get("passthrough_gears") or {}).items():
+                if g in group_addrs:
+                    per_vehicle[g] = group_addrs[g]
+            for _ref_s, g in (c.get("passthrough_extra") or {}).items():
+                if g in group_addrs:
+                    per_vehicle[g] = group_addrs[g]
+        vehicles[sn] = per_vehicle
 
-    header = ["Vehicle", "shortName"] + [f"DI {addr} | {group}" for group, addr in cols_sorted]
-    rows = [header]
-    for sn, display in vehicles:
-        row = [display, sn]
-        for group, _addr in cols_sorted:
-            row.append(matrix[sn].get(group, ""))
+    return {
+        "vehicle_order": vehicle_order,
+        "function_order": function_order,
+        "descriptions": collect_descriptions(cfg),
+        "vehicles": vehicles,
+    }
+
+
+def build_rows(data: dict) -> list[list[str | int]]:
+    vehicle_order = data["vehicle_order"]
+    header: list[str | int] = ["Description", "Function"] + vehicle_order
+    rows: list[list[str | int]] = [header]
+    for group in data["function_order"]:
+        row: list[str | int] = [data["descriptions"].get(group, ""), group]
+        for sn in vehicle_order:
+            row.append(data["vehicles"][sn].get(group, ""))
         rows.append(row)
     return rows
 
 
-def write_xlsx(path: Path, rows: list[list[str]]) -> None:
+def write_json(path: Path, data: dict) -> None:
+    payload = {sn: data["vehicles"][sn] for sn in data["vehicle_order"] if data["vehicles"][sn]}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+
+def write_xlsx(path: Path, rows: list[list[str | int]]) -> None:
     shared: list[str] = []
     shared_idx: dict[str, int] = {}
 
@@ -65,12 +118,14 @@ def write_xlsx(path: Path, rows: list[list[str]]) -> None:
     for r_i, row in enumerate(rows, start=1):
         cells: list[str] = []
         for c_i, val in enumerate(row, start=1):
-            text = "" if val is None else str(val)
-            if text == "":
+            if val == "" or val is None:
                 continue
             ref = f"{col_letter(c_i)}{r_i}"
-            idx = register(text)
-            cells.append(f'<c r="{ref}" t="s"><v>{idx}</v></c>')
+            if isinstance(val, int):
+                cells.append(f'<c r="{ref}"><v>{val}</v></c>')
+            else:
+                idx = register(str(val))
+                cells.append(f'<c r="{ref}" t="s"><v>{idx}</v></c>')
         sheet_rows.append(f'<row r="{r_i}">{"".join(cells)}</row>')
 
     sheet_xml = (
@@ -140,11 +195,45 @@ def write_xlsx(path: Path, rows: list[list[str]]) -> None:
 
 
 def main() -> None:
-    with CONFIG.open(encoding="utf-8") as f:
+    ap = argparse.ArgumentParser(description="Build passthrough mapping table from monitor_config.json")
+    ap.add_argument(
+        "--format",
+        "-f",
+        choices=("xlsx", "json"),
+        default="xlsx",
+        help="output format (default: xlsx)",
+    )
+    ap.add_argument(
+        "--output",
+        "-o",
+        type=Path,
+        default=None,
+        help="output file path (default: passthrough_map.xlsx or passthrough_map.json)",
+    )
+    ap.add_argument(
+        "--config",
+        "-c",
+        type=Path,
+        default=CONFIG,
+        help=f"monitor config path (default: {CONFIG})",
+    )
+    args = ap.parse_args()
+
+    with args.config.open(encoding="utf-8") as f:
         cfg = json.load(f)
-    rows = build_rows(cfg)
-    write_xlsx(OUTPUT, rows)
-    print(f"Wrote {OUTPUT} ({len(rows) - 1} vehicles, {len(rows[0]) - 2} passthrough columns)")
+
+    data = build_map(cfg)
+    n_functions = len(data["function_order"])
+    n_vehicles = len(data["vehicle_order"])
+
+    if args.format == "json":
+        output = args.output or DEFAULT_JSON
+        write_json(output, data)
+    else:
+        output = args.output or DEFAULT_XLSX
+        write_xlsx(output, build_rows(data))
+
+    print(f"Wrote {output} ({n_functions} functions, {n_vehicles} vehicles)")
 
 
 if __name__ == "__main__":
