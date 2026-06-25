@@ -29,12 +29,12 @@ def _startup_indicator_blink(poller: Any) -> None:
     # Visible blink cadence; keep short to avoid slowing startup.
     step_sleep_sec = 0.25
     max_total_sec = 15.0
-    start = time.monotonic()
 
     seq = [(True, False), (True, True), (False, True), (False, False)]
 
-    # Give poller a moment to initialize (especially right after service start).
-    time.sleep(0.4)
+    # Wait for the network switch to bring MB_IO_1 online after service start.
+    time.sleep(15.0)
+    start = time.monotonic()
 
     for _ in range(3):
         for c0, c1 in seq:
