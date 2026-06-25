@@ -177,13 +177,13 @@
             {
               "ref": 10000,
               "label": "Наклон подъемника на себя",
-              "passthrough": "di:0"
+              "passthrough": "lift:tilt"
             },
             {
               "ref": 10001,
               "invert": true,
               "label": "Вилы подняты > 30см",
-              "passthrough": "di:1"
+              "passthrough": "lift:up"
             },
             {
               "ref": 10002,
@@ -305,12 +305,12 @@
             {
               "ref": 10000,
               "label": "Наклон подъемника на себя",
-              "passthrough": "di:0"
+              "passthrough": "lift:tilt"
             },
             {
               "ref": 10001,
               "label": "Вилы подняты > 30см",
-              "passthrough": "di:1"
+              "passthrough": "lift:up"
             },
             {
               "ref": 10002,
@@ -524,22 +524,6 @@
           "base": 0,
           "points": [
             {
-              "ref": 0,
-              "label": "Колонна красный",
-              "passthrough": "di:0"
-            },
-            {
-              "ref": 1,
-              "label": "Колонна зеленый",
-              "passthrough": "di:1"
-            },
-            {
-              "ref": 2,
-              "label": "Колонна сигнал",
-              "style": "horn",
-              "passthrough": "horn"
-            },
-            {
               "ref": 10000,
               "label": "Правый поворотник",
               "style": "indicator",
@@ -696,12 +680,6 @@
             {
               "ref": 10005,
               "label": "Ближний свет",
-              "style": "light",
-              "passthrough": "light_low"
-            },
-            {
-              "ref": 10008,
-              "label": "Ближний свет [10008]",
               "style": "light",
               "passthrough": "light_low"
             },
@@ -868,13 +846,13 @@
           ],
           "gear_points": {
             "10013": "F",
-            "10014": "FH",
-            "10005": "КПП задний"
+            "10014": "H",
+            "10005": "R"
           },
           "passthrough_gears": {
             "10013": "gear:F",
-            "10014": "gear:FH",
-            "10005": "gear:КПП задний"
+            "10014": "gear:H",
+            "10005": "gear:R"
           }
         }
       ],
@@ -916,17 +894,17 @@
             {
               "ref": 10000,
               "label": "Ковш",
-              "passthrough": "di:0"
+              "passthrough": "bucket"
             },
             {
               "ref": 10001,
               "label": "Лапа 2 колено",
-              "passthrough": "di:1"
+              "passthrough": "leg:2"
             },
             {
               "ref": 10002,
               "label": "Лапа 1 колено",
-              "passthrough": "di:2"
+              "passthrough": "leg:1"
             },
             {
               "ref": 10004,
@@ -958,27 +936,28 @@
             {
               "ref": 10001,
               "label": "Левый назад",
-              "passthrough": "di:1"
+              "passthrough": "trackL:R"
             },
             {
               "ref": 10002,
               "label": "Левый вперед",
-              "passthrough": "di:2"
+              "passthrough": "trackL:F"
             },
             {
               "ref": 10005,
               "label": "Правый вперед",
-              "passthrough": "di:5"
+              "passthrough": "trackR:F"
             },
             {
               "ref": 10007,
               "label": "Правый назад",
-              "passthrough": "di:7"
+              "passthrough": "trackR:R"
             },
             {
               "ref": 10013,
               "label": "Двигатель",
-              "passthrough": "di:13"
+              "style": "engine",
+              "passthrough": "engine"
             }
           ]
         }
@@ -1004,13 +983,13 @@
             {
               "ref": 10001,
               "label": "Наклон подъемника на себя",
-              "passthrough": "di:1"
+              "passthrough": "lift:tilt"
             },
             {
               "ref": 10002,
               "invert": true,
               "label": "Вилы подняты > 30см",
-              "passthrough": "di:2"
+              "passthrough": "lift:up"
             },
             {
               "ref": 10256,
@@ -1054,7 +1033,7 @@
             {
               "ref": 10007,
               "label": "Тормоз",
-              "style": "break",
+              "style": "brake",
               "passthrough": "brake"
             },
             {
@@ -1134,12 +1113,12 @@
               "ref": 10001,
               "invert": true,
               "label": "Вилы подняты > 30см",
-              "passthrough": "di:1"
+              "passthrough": "lift:up"
             },
             {
               "ref": 10002,
               "label": "Наклон подъемника на себя",
-              "passthrough": "di:2"
+              "passthrough": "lift:tilt"
             },
             {
               "ref": 10256,
@@ -1183,7 +1162,7 @@
             {
               "ref": 10007,
               "label": "Тормоз",
-              "style": "break",
+              "style": "brake",
               "passthrough": "brake"
             },
             {
@@ -1264,7 +1243,6 @@
       "gear:F": 13,
       "gear:H": 14,
       "gear:L": 15,
-      "gear:FH": 16,
       "gear:F1": 17,
       "gear:F2": 18,
       "gear:F3": 19,
@@ -1277,13 +1255,15 @@
       "gear:R1": 26,
       "gear:R2": 27,
       "gear:SEL": 28,
-      "gear:КПП_задний": 29,
-      "di:0": 30,
-      "di:1": 31,
-      "di:2": 32,
-      "di:5": 33,
-      "di:7": 34,
-      "di:13": 35
+      "lift:tilt": 30,
+      "lift:up": 31,
+      "trackL:F": 32,
+      "trackR:F": 33,
+      "trackR:R": 34,
+      "trackL:R": 36,
+      "bucket": 37,
+      "leg:1": 38,
+      "leg:2": 39
     }
   },
   "logging": {
