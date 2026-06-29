@@ -56,6 +56,21 @@ MAX_MODBUS_REF_SPAN = 100  # Modbus read 'count' upper bound per request
 HISTORY_WINDOW_SEC = 600
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 
+EXTERNAL_LOG_SOURCES: Dict[str, Dict[str, Any]] = {
+    "networkmanager": {
+        "tail_cmd": ["journalctl", "-u", "NetworkManager", "-n", "50", "--no-pager", "--output=short-iso"],
+        "follow_cmd": ["journalctl", "-u", "NetworkManager", "-f", "-n", "0", "--no-pager", "--output=short-iso"],
+    },
+    "exam-vehicle": {
+        "tail_cmd": ["docker", "logs", "--tail", "50", "exam-vehicle"],
+        "follow_cmd": ["docker", "logs", "-f", "--tail", "0", "exam-vehicle"],
+    },
+    "wlan-watchdog": {
+        "tail_cmd": ["tail", "-n", "50", "/var/log/wlan_watchdog/wlan_watchdog.log"],
+        "follow_cmd": ["tail", "-f", "-n", "0", "/var/log/wlan_watchdog/wlan_watchdog.log"],
+    },
+}
+
 # Full-fidelity log schema
 FULL_LOG_SCHEMA_VERSION = 1
 FULL_LOG_COMPRESSED_SUFFIX = ".jsonl.gz"
@@ -3015,6 +3030,85 @@ class WebServer:
                 pass
         return ws
 
+    def _tail_external_log(self, source: str) -> Tuple[List[str], Optional[str]]:
+        spec = EXTERNAL_LOG_SOURCES.get(source)
+        if spec is None:
+            return [], f"Unknown log source: {source}"
+        try:
+            res = subprocess.run(
+                spec["tail_cmd"],
+                capture_output=True,
+                text=True,
+                timeout=8,
+            )
+            output = (res.stdout or "").splitlines()
+            if res.returncode != 0:
+                err = (res.stderr or res.stdout or "").strip() or f"exit {res.returncode}"
+                if output:
+                    return output, err
+                return [], err
+            return [ln for ln in output if ln], None
+        except Exception as e:
+            return [], str(e)
+
+    async def _stream_external_logs(self, ws: web.WebSocketResponse, source: str) -> None:
+        loop = asyncio.get_running_loop()
+        init_lines, err = await loop.run_in_executor(None, self._tail_external_log, source)
+        init_payload = [{"line": ln} for ln in init_lines]
+        if err and not init_lines:
+            init_payload = [{"line": f"[error] {err}"}]
+        elif err:
+            init_payload.append({"line": f"[warning] tail command: {err}"})
+        await ws.send_json({"type": "log_init", "data": {"lines": init_payload}})
+
+        spec = EXTERNAL_LOG_SOURCES.get(source)
+        if spec is None:
+            return
+
+        proc: Optional[asyncio.subprocess.Process] = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *spec["follow_cmd"],
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            assert proc.stdout is not None
+            while not self.stop_event.is_set():
+                line = await proc.stdout.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", errors="replace").rstrip("\n")
+                if text:
+                    await ws.send_json({"type": "log", "data": {"lines": [{"line": text}]}})
+        except Exception as e:
+            try:
+                await ws.send_json({"type": "log", "data": {"lines": [{"line": f"[stream error] {e}"}]}})
+            except Exception:
+                pass
+        finally:
+            if proc is not None:
+                try:
+                    proc.terminate()
+                    await asyncio.wait_for(proc.wait(), timeout=2.0)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+
+    async def websocket_external_logs_handler(self, request: web.Request) -> web.WebSocketResponse:
+        source = str(request.match_info.get("source") or "").strip().lower()
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        try:
+            await self._stream_external_logs(ws, source)
+        finally:
+            try:
+                await ws.close()
+            except Exception:
+                pass
+        return ws
+
     async def broadcast_snapshot(self):
         if not self.websockets:
             return
@@ -3054,6 +3148,7 @@ class WebServer:
                 web.get("/ping", self.ping),
                 web.get("/ws", self.websocket_handler),
                 web.get("/wslogs", self.websocket_logs_handler),
+                web.get("/wsexternallogs/{source}", self.websocket_external_logs_handler),
                 web.get("/wifilogs", self.wifi_logs_index),
                 web.get("/wifilogs/view/{name}", self.wifi_logs_view),
                 web.get("/wifilogs/download/{name}", self.wifi_logs_download),

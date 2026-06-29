@@ -211,6 +211,53 @@
       gap: 12px;
       max-width: 480px;
     }
+    .settings-logs-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+      gap: 16px;
+      margin-top: 8px;
+    }
+    .settings-log-card {
+      background: #11232b;
+      border: 1px solid #1c3a43;
+      border-radius: 6px;
+      padding: 14px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      min-width: 0;
+    }
+    .settings-log-header { display: flex; flex-direction: column; gap: 2px; }
+    .settings-log-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .settings-log-toolbar input {
+      background: #07161b;
+      color: #e8f1f2;
+      border: 1px solid #1c3a43;
+      border-radius: 6px;
+      padding: 5px 8px;
+      font-size: 12px;
+      width: 180px;
+    }
+    .settings-log-toolbar .log-btn { height: 30px; font-size: 12px; padding: 0 10px; }
+    .logbox-sm {
+      background: #07161b;
+      border: 1px solid #1c3a43;
+      border-radius: 6px;
+      padding: 8px;
+      height: 220px;
+      overflow: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 11px;
+      line-height: 1.4;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .log-status-waiting { color: #9ad1d4; font-size: 12px; font-style: italic; }
     .settings-row {
       background: #11232b;
       border: 1px solid #1c3a43;
@@ -368,6 +415,47 @@
           <a href="/combined" class="btn-primary">Open</a>
         </div>
       </div>
+
+      <div class="settings-logs-grid">
+        <div class="settings-log-card" data-log-source="networkmanager">
+          <div class="settings-log-header">
+            <span class="settings-row-title">NetworkManager</span>
+            <span class="settings-row-sub">Live journal tail (NetworkManager.service)</span>
+          </div>
+          <div class="settings-log-toolbar">
+            <input type="text" class="log-filter" placeholder="Filter…" />
+            <button type="button" class="log-btn log-follow">Follow: ON</button>
+            <button type="button" class="log-btn log-clear">Clear</button>
+          </div>
+          <div class="logbox-sm log-view" role="log" aria-live="polite"></div>
+        </div>
+
+        <div class="settings-log-card" data-log-source="exam-vehicle">
+          <div class="settings-log-header">
+            <span class="settings-row-title">exam-vehicle</span>
+            <span class="settings-row-sub">Live docker logs (exam-vehicle container)</span>
+          </div>
+          <div class="settings-log-toolbar">
+            <input type="text" class="log-filter" placeholder="Filter…" />
+            <button type="button" class="log-btn log-follow">Follow: ON</button>
+            <button type="button" class="log-btn log-clear">Clear</button>
+          </div>
+          <div class="logbox-sm log-view" role="log" aria-live="polite"></div>
+        </div>
+
+        <div class="settings-log-card" data-log-source="wlan-watchdog">
+          <div class="settings-log-header">
+            <span class="settings-row-title">wlan0_watchdog</span>
+            <span class="settings-row-sub">/var/log/wlan_watchdog/wlan_watchdog.log</span>
+          </div>
+          <div class="settings-log-toolbar">
+            <input type="text" class="log-filter" placeholder="Filter…" />
+            <button type="button" class="log-btn log-follow">Follow: ON</button>
+            <button type="button" class="log-btn log-clear">Clear</button>
+          </div>
+          <div class="logbox-sm log-view" role="log" aria-live="polite"></div>
+        </div>
+      </div>
     </div>
   </main>
 
@@ -407,6 +495,11 @@
         panel.classList.toggle('active', panel.id === `tab-${name}`);
       });
       sessionStorage.setItem('activeTab', name);
+      if (name === 'settings') {
+        connectSettingsLogViewers();
+      } else {
+        disconnectSettingsLogViewers();
+      }
     }
 
     tabBar.querySelectorAll('.tab-btn').forEach((btn) => {
@@ -416,6 +509,115 @@
     // Restore last active tab on reload.
     const savedTab = sessionStorage.getItem('activeTab');
     if (savedTab) activateTab(savedTab);
+
+    // ── Settings live log viewers ───────────────────────────────────
+    const settingsLogViewers = [];
+
+    function createSettingsLogViewer(card) {
+      const source = card.dataset.logSource;
+      const logbox = card.querySelector('.log-view');
+      const filterEl = card.querySelector('.log-filter');
+      const followEl = card.querySelector('.log-follow');
+      const clearEl = card.querySelector('.log-clear');
+      let follow = true;
+      let ws = null;
+      let buffer = [];
+      let reconnectTimer = null;
+      let connected = false;
+
+      function shouldFollow() {
+        if (!follow) return false;
+        return (logbox.scrollTop + logbox.clientHeight) >= (logbox.scrollHeight - 30);
+      }
+
+      function applyFilter(lines) {
+        const q = (filterEl.value || '').trim().toLowerCase();
+        if (!q) return lines;
+        return lines.filter((l) => String(l).toLowerCase().includes(q));
+      }
+
+      function render() {
+        const before = shouldFollow();
+        const lines = applyFilter(buffer);
+        logbox.textContent = lines.length ? lines.join('\n') : (connected ? '' : 'Connecting…');
+        if (before) logbox.scrollTop = logbox.scrollHeight;
+      }
+
+      function handleMessage(ev) {
+        try {
+          const msg = JSON.parse(ev.data || '{}');
+          const lines = msg?.data?.lines;
+          if (msg?.type === 'log_init' && Array.isArray(lines)) {
+            buffer = lines.map((x) => x?.line || '').filter(Boolean);
+            connected = true;
+            render();
+            return;
+          }
+          if (msg?.type === 'log' && Array.isArray(lines)) {
+            for (const item of lines) {
+              const line = item?.line;
+              if (typeof line === 'string' && line.length) buffer.push(line);
+            }
+            if (buffer.length > 3000) buffer = buffer.slice(buffer.length - 3000);
+            render();
+          }
+        } catch (_e) {}
+      }
+
+      function connect() {
+        if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+        connected = false;
+        render();
+        const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+        ws = new WebSocket(`${proto}://${location.host}/wsexternallogs/${encodeURIComponent(source)}`);
+        ws.onmessage = handleMessage;
+        ws.onopen = () => { connected = true; };
+        ws.onclose = () => {
+          connected = false;
+          ws = null;
+          if (reconnectTimer) clearTimeout(reconnectTimer);
+          reconnectTimer = setTimeout(() => {
+            const panel = document.getElementById('tab-settings');
+            if (panel && panel.classList.contains('active')) connect();
+          }, 1500);
+        };
+      }
+
+      function disconnect() {
+        if (reconnectTimer) {
+          clearTimeout(reconnectTimer);
+          reconnectTimer = null;
+        }
+        if (ws) {
+          ws.onclose = null;
+          ws.close();
+          ws = null;
+        }
+        connected = false;
+      }
+
+      followEl.onclick = () => {
+        follow = !follow;
+        followEl.textContent = `Follow: ${follow ? 'ON' : 'OFF'}`;
+        if (follow) logbox.scrollTop = logbox.scrollHeight;
+      };
+      clearEl.onclick = () => { buffer = []; render(); };
+      filterEl.addEventListener('input', () => render());
+
+      return { connect, disconnect };
+    }
+
+    document.querySelectorAll('.settings-log-card[data-log-source]').forEach((card) => {
+      settingsLogViewers.push(createSettingsLogViewer(card));
+    });
+
+    function connectSettingsLogViewers() {
+      settingsLogViewers.forEach((v) => v.connect());
+    }
+
+    function disconnectSettingsLogViewers() {
+      settingsLogViewers.forEach((v) => v.disconnect());
+    }
 
     // Keep tab-bar top offset in sync with header height.
     function syncTabBarTop() {
