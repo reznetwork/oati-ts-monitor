@@ -58,14 +58,20 @@ TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 
 EXTERNAL_LOG_SOURCES: Dict[str, Dict[str, Any]] = {
     "networkmanager": {
+        "title": "NetworkManager",
+        "subtitle": "Live journal tail (NetworkManager.service)",
         "tail_cmd": ["journalctl", "-u", "NetworkManager", "-n", "50", "--no-pager", "--output=short-iso"],
         "follow_cmd": ["journalctl", "-u", "NetworkManager", "-f", "-n", "0", "--no-pager", "--output=short-iso"],
     },
     "exam-vehicle": {
+        "title": "exam-vehicle",
+        "subtitle": "Live docker logs (exam-vehicle container)",
         "tail_cmd": ["docker", "logs", "--tail", "50", "exam-vehicle"],
         "follow_cmd": ["docker", "logs", "-f", "--tail", "0", "exam-vehicle"],
     },
     "wlan-watchdog": {
+        "title": "wlan0_watchdog",
+        "subtitle": "/var/log/wlan_watchdog/wlan_watchdog.log",
         "tail_cmd": ["tail", "-n", "50", "/var/log/wlan_watchdog/wlan_watchdog.log"],
         "follow_cmd": ["tail", "-f", "-n", "0", "/var/log/wlan_watchdog/wlan_watchdog.log"],
     },
@@ -2819,6 +2825,7 @@ class WebServer:
         self.combined_template = self.jinja.get_template("combined_dashboard.html")
         self.logs_template = self.jinja.get_template("wifi_logs.html")
         self.app_logs_template = self.jinja.get_template("app_logs.html")
+        self.external_logs_template = self.jinja.get_template("external_logs.html")
 
     async def index(self, _request: web.Request) -> web.Response:
         return web.Response(text=self.template.render(initial_state=jsonlib.dumps(self.state.snapshot())), content_type="text/html")
@@ -2832,6 +2839,20 @@ class WebServer:
             "logs": self.state.app_log_tail(50),
         }
         return web.Response(text=self.app_logs_template.render(initial_state=jsonlib.dumps(initial)), content_type="text/html")
+
+    async def external_logs_index(self, request: web.Request) -> web.Response:
+        source = str(request.match_info.get("source") or "").strip().lower()
+        spec = EXTERNAL_LOG_SOURCES.get(source)
+        if spec is None:
+            raise web.HTTPNotFound()
+        return web.Response(
+            text=self.external_logs_template.render(
+                page_title=spec.get("title", source),
+                page_subtitle=spec.get("subtitle", ""),
+                initial_state=jsonlib.dumps({"source": source}),
+            ),
+            content_type="text/html",
+        )
 
     async def ping(self, _request: web.Request) -> web.Response:
         # Used by other dashboards to check if this vehicle's web UI is reachable.
@@ -3145,6 +3166,7 @@ class WebServer:
                 web.get("/", self.index),
                 web.get("/combined", self.combined_index),
                 web.get("/logs", self.app_logs_index),
+                web.get("/logs/{source}", self.external_logs_index),
                 web.get("/ping", self.ping),
                 web.get("/ws", self.websocket_handler),
                 web.get("/wslogs", self.websocket_logs_handler),
