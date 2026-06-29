@@ -37,7 +37,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--read-mode",
         choices=("multi", "single"),
         default="multi",
-        help="Read passthrough values as one range request or as one query per address (default: multi)",
+        help="multi: one FC02/FC01 read from min to max DI address; single: one read per address (default: multi)",
     )
     return ap
 
