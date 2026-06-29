@@ -11,6 +11,7 @@ import logging.handlers
 import os
 import queue
 import re
+import shutil
 import socket
 import subprocess
 import threading
@@ -66,8 +67,8 @@ EXTERNAL_LOG_SOURCES: Dict[str, Dict[str, Any]] = {
     "exam-vehicle": {
         "title": "exam-vehicle",
         "subtitle": "Live docker logs (exam-vehicle container)",
-        "tail_cmd": ["docker", "logs", "--tail", "50", "exam-vehicle"],
-        "follow_cmd": ["docker", "logs", "-f", "--tail", "0", "exam-vehicle"],
+        "kind": "docker",
+        "container": "exam-vehicle",
     },
     "wlan-watchdog": {
         "title": "wlan0_watchdog",
@@ -457,6 +458,7 @@ class AppCfg:
     detailed_wifi_log_file: Optional[str] = None
     app_log_file: Optional[str] = None
     app_log_level: Optional[str] = None
+    docker_log_container: Optional[str] = None
     # Full-fidelity always-on logging (JSONL)
     full_log_enabled: bool = False
     full_log_dir: str = "logs/full"
@@ -1610,6 +1612,7 @@ def load_config(path: str) -> AppCfg:
     logging_cfg = raw.get("logging", {}) or {}
     app_log_file = logging_cfg.get("appLogFile") or logging_cfg.get("app_log_file") or None
     app_log_level = logging_cfg.get("appLogLevel") or logging_cfg.get("app_log_level") or logging_cfg.get("level") or None
+    docker_log_container = logging_cfg.get("dockerLogContainer") or logging_cfg.get("docker_log_container") or None
     full_cfg = logging_cfg.get("full") or logging_cfg.get("fullLog") or {}
     if not isinstance(full_cfg, dict):
         full_cfg = {}
@@ -1662,6 +1665,7 @@ def load_config(path: str) -> AppCfg:
         detailed_wifi_log_file=str(wifi_cfg.get("detailedLogFile")).strip() if wifi_cfg.get("detailedLogFile") else None,
         app_log_file=str(app_log_file).strip() if app_log_file else None,
         app_log_level=str(app_log_level).strip() if app_log_level else None,
+        docker_log_container=str(docker_log_container).strip() if docker_log_container else None,
         full_log_enabled=_as_bool(full_cfg.get("enabled"), False),
         full_log_dir=str(full_cfg.get("dir") or full_cfg.get("baseDir") or "logs/full"),
         full_log_snapshot_interval_sec=_as_float(full_cfg.get("snapshotIntervalSec"), 1.0),
@@ -2821,6 +2825,66 @@ class Poller:
             self.thread.join(timeout=2)
 
 
+def _docker_bin() -> str:
+    return shutil.which("docker") or "/usr/bin/docker"
+
+
+def _run_log_command(cmd: List[str], *, timeout: float = 8.0) -> Tuple[List[str], Optional[str]]:
+    try:
+        res = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            stderr=subprocess.STDOUT,
+        )
+        output = [ln for ln in (res.stdout or "").splitlines() if ln]
+        if res.returncode != 0:
+            err = "\n".join(output).strip() or (res.stderr or "").strip() or f"exit {res.returncode}"
+            return [], err
+        return output, None
+    except Exception as e:
+        return [], str(e)
+
+
+def _resolve_docker_container(docker: str, name: str) -> Tuple[Optional[str], Optional[str]]:
+    if not shutil.which("docker") and not os.path.isfile(docker):
+        return None, "docker command not found (is Docker installed and in PATH?)"
+    matches: List[str] = []
+    try:
+        res = subprocess.run(
+            [docker, "ps", "-a", "--filter", f"name={name}", "--format", "{{.Names}}"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            stderr=subprocess.STDOUT,
+        )
+        if res.returncode != 0:
+            err = (res.stdout or "").strip() or f"docker ps failed (exit {res.returncode})"
+            return None, err
+        matches = [ln.strip() for ln in (res.stdout or "").splitlines() if ln.strip()]
+    except Exception as e:
+        return None, str(e)
+
+    if matches:
+        for m in matches:
+            short = m.split("/")[-1]
+            if short == name or m == name:
+                return short, None
+        if len(matches) == 1:
+            return matches[0].split("/")[-1], None
+        for m in matches:
+            short = m.split("/")[-1]
+            if short.endswith(name) or name in short:
+                return short, None
+        return matches[0].split("/")[-1], None
+
+    _, probe_err = _run_log_command([docker, "logs", "--tail", "1", name], timeout=8)
+    if probe_err:
+        return None, probe_err or f"No container matching '{name}'"
+    return name, None
+
+
 class WebServer:
     def __init__(self, state: AppState, host: str, port: int, broadcast_interval: float = 1.0, poller: Optional[Poller] = None):
         if jinja2 is None or web is None:
@@ -3063,24 +3127,90 @@ class WebServer:
         spec = EXTERNAL_LOG_SOURCES.get(source)
         if spec is None:
             return [], f"Unknown log source: {source}"
-        try:
-            res = subprocess.run(
-                spec["tail_cmd"],
-                capture_output=True,
-                text=True,
-                timeout=8,
+        if spec.get("kind") == "docker":
+            return [], None
+        tail_cmd = spec.get("tail_cmd")
+        if not tail_cmd:
+            return [], f"No tail command configured for: {source}"
+        return _run_log_command(list(tail_cmd))
+
+    def _docker_container_name(self, source: str, spec: Dict[str, Any]) -> str:
+        if source == "exam-vehicle" and self.state.appcfg.docker_log_container:
+            return self.state.appcfg.docker_log_container
+        return str(spec.get("container") or source)
+
+    async def _stream_docker_logs(self, ws: web.WebSocketResponse, source: str, spec: Dict[str, Any]) -> None:
+        docker = _docker_bin()
+        container = self._docker_container_name(source, spec)
+        loop = asyncio.get_running_loop()
+        resolved, resolve_err = await loop.run_in_executor(None, _resolve_docker_container, docker, container)
+        if resolve_err or not resolved:
+            await ws.send_json(
+                {
+                    "type": "log_init",
+                    "data": {"lines": [{"line": f"[error] {resolve_err or f'No container matching {container!r}'}"}]},
+                }
             )
-            output = (res.stdout or "").splitlines()
-            if res.returncode != 0:
-                err = (res.stderr or res.stdout or "").strip() or f"exit {res.returncode}"
-                if output:
-                    return output, err
-                return [], err
-            return [ln for ln in output if ln], None
-        except Exception as e:
-            return [], str(e)
+            return
+
+        await ws.send_json({"type": "log_init", "data": {"lines": []}})
+        cmd = [docker, "logs", "-f", "--tail", "50", resolved]
+        while not self.stop_event.is_set():
+            proc: Optional[asyncio.subprocess.Process] = None
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+                assert proc.stdout is not None
+                while not self.stop_event.is_set():
+                    line = await proc.stdout.readline()
+                    if not line:
+                        break
+                    text = line.decode("utf-8", errors="replace").rstrip("\n")
+                    if text:
+                        await ws.send_json({"type": "log", "data": {"lines": [{"line": text}]}})
+                rc = await proc.wait()
+                if self.stop_event.is_set():
+                    break
+                if rc != 0:
+                    await ws.send_json(
+                        {
+                            "type": "log",
+                            "data": {"lines": [{"line": f"[docker logs exited {rc}, reconnecting…]"}]},
+                        }
+                    )
+                await asyncio.sleep(2.0)
+            except Exception as e:
+                try:
+                    await ws.send_json({"type": "log", "data": {"lines": [{"line": f"[stream error] {e}"}]}})
+                except Exception:
+                    pass
+                await asyncio.sleep(2.0)
+            finally:
+                if proc is not None:
+                    try:
+                        proc.terminate()
+                        await asyncio.wait_for(proc.wait(), timeout=2.0)
+                    except Exception:
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
 
     async def _stream_external_logs(self, ws: web.WebSocketResponse, source: str) -> None:
+        spec = EXTERNAL_LOG_SOURCES.get(source)
+        if spec is None:
+            await ws.send_json(
+                {"type": "log_init", "data": {"lines": [{"line": f"[error] Unknown log source: {source}"}]}}
+            )
+            return
+
+        if spec.get("kind") == "docker":
+            await self._stream_docker_logs(ws, source, spec)
+            return
+
         loop = asyncio.get_running_loop()
         init_lines, err = await loop.run_in_executor(None, self._tail_external_log, source)
         init_payload = [{"line": ln} for ln in init_lines]
@@ -3090,14 +3220,14 @@ class WebServer:
             init_payload.append({"line": f"[warning] tail command: {err}"})
         await ws.send_json({"type": "log_init", "data": {"lines": init_payload}})
 
-        spec = EXTERNAL_LOG_SOURCES.get(source)
-        if spec is None:
+        follow_cmd = spec.get("follow_cmd")
+        if not follow_cmd:
             return
 
         proc: Optional[asyncio.subprocess.Process] = None
         try:
             proc = await asyncio.create_subprocess_exec(
-                *spec["follow_cmd"],
+                *follow_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
