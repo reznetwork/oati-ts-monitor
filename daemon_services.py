@@ -160,6 +160,11 @@ class ModbusDiscreteInputsMirrorServer:
             seed_addrs[int(addr)] = False
         for addr in self._ref_map.values():
             seed_addrs[int(addr)] = False
+        if len(seed_addrs) > 1:
+            # Fill gaps so FC02/FC01 range reads do not hit illegal-address holes (e.g. DI 16).
+            max_addr = max(seed_addrs)
+            for addr in range(max_addr + 1):
+                seed_addrs.setdefault(addr, False)
         self._data_block = MirrorPassthroughDataBlock(seed_addrs)
         self._store = ModbusDeviceContext(di=self._data_block.block, co=self._data_block.block)
         self._context = ModbusServerContext(devices=self._store, single=True)
