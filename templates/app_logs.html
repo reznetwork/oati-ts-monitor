@@ -56,15 +56,13 @@
     <div id="logbox" class="logbox" role="log" aria-live="polite"></div>
   </main>
   <script>
-    const payload = {{ initial_state | safe }};
-    const initialLines = Array.isArray(payload?.logs) ? payload.logs : [];
     const logbox = document.getElementById('logbox');
     const filterEl = document.getElementById('filter');
     const toggleFollowEl = document.getElementById('toggleFollow');
     const clearEl = document.getElementById('clear');
     let follow = true;
     let ws = null;
-    let buffer = initialLines.slice(-500).map((x) => x?.line || '').filter(Boolean);
+    let buffer = [];
 
     function shouldFollow() {
       if (!follow) return false;

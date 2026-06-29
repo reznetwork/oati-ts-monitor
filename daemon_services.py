@@ -572,7 +572,21 @@ class AppState:
     def app_log_tail(self, limit: int = 50) -> List[Dict[str, Any]]:
         lim = max(1, min(int(limit or 50), 500))
         with self.lock:
-            return list(self._app_logs)[-lim:]
+            items = list(self._app_logs)[-lim:]
+        if items:
+            return items
+        log_file = self.appcfg.app_log_file
+        if not log_file:
+            return []
+        try:
+            path = Path(str(log_file)).expanduser()
+            if not path.exists():
+                return []
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            tail = [ln for ln in lines[-lim:] if ln]
+            return [{"seq": 0, "line": ln} for ln in tail]
+        except Exception:
+            return []
 
     def app_logs_since(self, seq: int) -> List[Dict[str, Any]]:
         try:
@@ -2834,11 +2848,7 @@ class WebServer:
         return web.Response(text=self.combined_template.render(initial_state=jsonlib.dumps(self.state.snapshot())), content_type="text/html")
 
     async def app_logs_index(self, _request: web.Request) -> web.Response:
-        initial = {
-            "state": self.state.snapshot(),
-            "logs": self.state.app_log_tail(50),
-        }
-        return web.Response(text=self.app_logs_template.render(initial_state=jsonlib.dumps(initial)), content_type="text/html")
+        return web.Response(text=self.app_logs_template.render(), content_type="text/html")
 
     async def external_logs_index(self, request: web.Request) -> web.Response:
         source = str(request.match_info.get("source") or "").strip().lower()
@@ -3033,12 +3043,10 @@ class WebServer:
             await ws.send_json({"type": "log_init", "data": {"lines": init}})
             loop = asyncio.get_running_loop()
             while not self.stop_event.is_set():
-                try:
-                    triggered = await loop.run_in_executor(None, self.state.app_log_event.wait, 1.0)
-                finally:
-                    self.state.app_log_event.clear()
+                triggered = await loop.run_in_executor(None, self.state.app_log_event.wait, 1.0)
                 if not triggered:
                     continue
+                self.state.app_log_event.clear()
                 lines = self.state.app_logs_since(last_seq)
                 if not lines:
                     continue
