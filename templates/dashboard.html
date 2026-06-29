@@ -487,29 +487,6 @@
     const tabBar = document.getElementById('tabBar');
     const header = document.getElementById('mainHeader');
 
-    function activateTab(name) {
-      document.querySelectorAll('.tab-btn').forEach((btn) => {
-        btn.classList.toggle('active', btn.dataset.tab === name);
-      });
-      document.querySelectorAll('.tab-panel').forEach((panel) => {
-        panel.classList.toggle('active', panel.id === `tab-${name}`);
-      });
-      sessionStorage.setItem('activeTab', name);
-      if (name === 'settings') {
-        connectSettingsLogViewers();
-      } else {
-        disconnectSettingsLogViewers();
-      }
-    }
-
-    tabBar.querySelectorAll('.tab-btn').forEach((btn) => {
-      btn.addEventListener('click', () => activateTab(btn.dataset.tab));
-    });
-
-    // Restore last active tab on reload.
-    const savedTab = sessionStorage.getItem('activeTab');
-    if (savedTab) activateTab(savedTab);
-
     // ── Settings live log viewers ───────────────────────────────────
     const settingsLogViewers = [];
 
@@ -618,6 +595,25 @@
     function disconnectSettingsLogViewers() {
       settingsLogViewers.forEach((v) => v.disconnect());
     }
+
+    function activateTab(name) {
+      document.querySelectorAll('.tab-btn').forEach((btn) => {
+        btn.classList.toggle('active', btn.dataset.tab === name);
+      });
+      document.querySelectorAll('.tab-panel').forEach((panel) => {
+        panel.classList.toggle('active', panel.id === `tab-${name}`);
+      });
+      sessionStorage.setItem('activeTab', name);
+      if (name === 'settings') {
+        connectSettingsLogViewers();
+      } else {
+        disconnectSettingsLogViewers();
+      }
+    }
+
+    tabBar.querySelectorAll('.tab-btn').forEach((btn) => {
+      btn.addEventListener('click', () => activateTab(btn.dataset.tab));
+    });
 
     // Keep tab-bar top offset in sync with header height.
     function syncTabBarTop() {
@@ -1004,6 +1000,9 @@
     connect();
     scanFleetOnline(state);
     setInterval(() => scanFleetOnline(state), 10_000);
+
+    const savedTab = sessionStorage.getItem('activeTab');
+    if (savedTab) activateTab(savedTab);
   </script>
 </body>
 </html>
