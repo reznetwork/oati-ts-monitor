@@ -173,6 +173,8 @@ class SocketIpcServer:
         return "error", {"error": f"unknown command: {command}"}
 
     def _broadcast_loop(self) -> None:
+        # Single consumer of update_event: clears after each wake so pollers
+        # must set() again on every state change.
         while not self.stop_event.is_set():
             triggered = self.state.update_event.wait(1.0)
             self.state.update_event.clear()
