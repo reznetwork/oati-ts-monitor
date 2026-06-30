@@ -2,46 +2,58 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>App Logs</title>
   <style>
-    body { font-family: Arial, sans-serif; background: #0b1e24; color: #e8f1f2; margin: 0; padding: 0; }
-    header { background: #12313b; padding: 12px 16px; font-size: 20px; position: sticky; top: 0; z-index: 1000; border-bottom: 1px solid #1c3a43; }
-    main { padding: 16px; }
-    a { color: #9ad1d4; }
-    .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 10px 0 14px; }
+    :root {
+      --bg-page: #0b1419; --bg-surface: #0f1b21; --bg-surface-2: #122029; --bg-inset: #07101400;
+      --border: #1f2e35; --border-strong: #2a3d46;
+      --text-primary: #e7ecee; --text-secondary: #9fb6bd; --text-muted: #5c7178; --accent: #3fb6d8;
+    }
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; background: var(--bg-page); color: var(--text-primary); margin: 0; padding: 0; }
+    header { background: var(--bg-surface); padding: 14px 20px; font-size: 15px; font-weight: 600; position: sticky; top: 0; z-index: 1000; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 16px; }
+    header a { font-size: 13px; font-weight: 500; }
+    main { padding: 20px; max-width: 1200px; margin: 0 auto; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 0 0 14px; }
     .field { display: flex; gap: 6px; align-items: center; font-size: 13px; }
-    .field label { opacity: 0.9; }
+    .field label { color: var(--text-secondary); }
     .field input {
-      background: #07161b; color: #e8f1f2; border: 1px solid #1c3a43; border-radius: 6px;
-      padding: 6px 8px; font-size: 13px;
+      background: var(--bg-surface); color: var(--text-primary); border: 1px solid var(--border);
+      border-radius: 6px; padding: 7px 10px; font-size: 13px;
     }
+    .field input:focus { outline: none; border-color: var(--accent); }
     .btn {
-      display: inline-block; background: #1c3a43; border: 1px solid #2b5662; color: #e8f1f2;
-      padding: 6px 10px; border-radius: 6px; text-decoration: none; cursor: pointer;
+      display: inline-flex; align-items: center; height: 32px; background: var(--bg-surface-2);
+      border: 1px solid var(--border-strong); color: var(--text-primary);
+      padding: 0 12px; border-radius: 6px; text-decoration: none; cursor: pointer; font-size: 12px; font-weight: 500;
     }
-    .btn:hover { background: #244a55; }
+    .btn:hover { background: #16242b; text-decoration: none; }
     .logbox {
-      background: #07161b;
-      border: 1px solid #1c3a43;
-      border-radius: 8px;
-      padding: 10px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px;
       height: 70vh;
       overflow: auto;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
       font-size: 12px;
-      line-height: 1.45;
+      line-height: 1.5;
       white-space: pre-wrap;
       word-break: break-word;
+      color: var(--text-secondary);
     }
-    .muted { opacity: 0.85; font-size: 12px; }
+    .muted { color: var(--text-muted); font-size: 12px; margin-bottom: 12px; }
   </style>
 </head>
 <body>
   <header>
-    App Logs
-    <a href="/" style="margin-left: 12px;">Dashboard</a>
-    <a href="/combined" style="margin-left: 12px;">Combined graph</a>
-    <a href="/wifilogs" style="margin-left: 12px;">WiFi logs</a>
+    App logs
+    <a href="/">Dashboard</a>
+    <a href="/combined">Combined graph</a>
+    <a href="/wifilogs">WiFi logs</a>
   </header>
   <main>
     <div class="muted">Live tail (last 50 lines, auto-updating).</div>
@@ -66,7 +78,6 @@
 
     function shouldFollow() {
       if (!follow) return false;
-      // Only auto-scroll if user is near bottom.
       const nearBottom = (logbox.scrollTop + logbox.clientHeight) >= (logbox.scrollHeight - 40);
       return nearBottom;
     }
@@ -122,4 +133,3 @@
   </script>
 </body>
 </html>
-
