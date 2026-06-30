@@ -87,13 +87,17 @@ class ChunkStorage:
     ) -> None:
         """Write a complete compressed segment file.
 
+        Empty payloads are accepted as a no-op (nothing stored).
+
         Raises ValueError for protocol violations (wrong size/checksum, etc.).
         Raises OSError for filesystem errors.
         """
-        if not payload:
-            raise ValueError("empty payload")
         if file_bytes != len(payload):
             raise ValueError(f"X-File-Bytes mismatch: header says {file_bytes}, body is {len(payload)} bytes")
+        if not payload:
+            if sha256 and sha256.lower() != hashlib.sha256(b"").hexdigest():
+                raise ValueError("X-File-Sha256 mismatch")
+            return
         if sha256:
             digest = hashlib.sha256(payload).hexdigest()
             if digest.lower() != sha256.lower():

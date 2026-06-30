@@ -169,6 +169,44 @@ class TestFullLogging(unittest.TestCase):
                 httpd.shutdown()
                 httpd.server_close()
 
+    def test_http_uploader_discards_empty_gzip_segment(self):
+        with tempfile.TemporaryDirectory() as td:
+            base_dir = Path(td) / "full"
+            vehicle_short = "v1"
+            day = "20260101"
+            seg_dir = base_dir / vehicle_short / day
+            seg_dir.mkdir(parents=True, exist_ok=True)
+            empty_gz = seg_dir / "segment_1710000000000_14.jsonl.gz"
+            empty_gz.write_bytes(b"")
+
+            _IngestHandler.received = b""
+            httpd = HTTPServer(("127.0.0.1", 0), _IngestHandler)
+            t = threading.Thread(target=httpd.serve_forever, daemon=True)
+            t.start()
+            try:
+                uploader = HttpLogUploader(
+                    enabled=True,
+                    base_dir=str(base_dir),
+                    url=f"http://127.0.0.1:{httpd.server_address[1]}/ingest",
+                    device_id="dev1",
+                    chunk_bytes=256 * 1024,
+                    state_file=str(Path(td) / "upload_state.json"),
+                    vehicle="v",
+                    vehicle_short=vehicle_short,
+                )
+                uploader.start()
+                deadline = time.time() + 2.0
+                while time.time() < deadline and empty_gz.exists():
+                    time.sleep(0.05)
+                uploader.stop()
+
+                self.assertFalse(empty_gz.exists())
+                with _IngestHandler.lock:
+                    self.assertEqual(_IngestHandler.received, b"")
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+
     def test_log_collector_stores_and_reads_compressed_file(self):
         async def _run():
             with tempfile.TemporaryDirectory() as td:
@@ -190,6 +228,34 @@ class TestFullLogging(unittest.TestCase):
                 self.assertEqual(gzip.decompress(stored.read_bytes()), raw)
                 records = await storage.read_segment_tail("dev1", "v1", "segment_1710000000000_0.jsonl.gz", 10)
                 self.assertEqual(records, [{"a": 1}, {"a": 2}])
+
+        asyncio.run(_run())
+
+    def test_log_collector_accepts_empty_payload(self):
+        async def _run():
+            with tempfile.TemporaryDirectory() as td:
+                storage = ChunkStorage(td)
+                app = make_app(storage)
+                headers = {
+                    "Content-Type": "application/gzip",
+                    "X-Log-Compression": "gzip",
+                    "X-Schema-Version": "1",
+                    "X-Device-Id": "dev1",
+                    "X-Vehicle": "vehicle",
+                    "X-Vehicle-Short": "v1",
+                    "X-Log-Segment": "segment_empty_0.jsonl.gz",
+                    "X-File-Bytes": "0",
+                    "X-File-Sha256": hashlib.sha256(b"").hexdigest(),
+                }
+                async with TestClient(TestServer(app)) as client:
+                    resp = await client.post("/ingest", data=b"", headers=headers)
+                    self.assertEqual(resp.status, 200)
+
+                stored = Path(td) / "dev1" / "v1" / "segment_empty_0.jsonl.gz"
+                self.assertFalse(stored.exists())
+                stats = await storage.stats()
+                self.assertEqual(stats["total_files"], 0)
+                self.assertEqual(stats["total_bytes"], 0)
 
         asyncio.run(_run())
 

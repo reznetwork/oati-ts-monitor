@@ -71,8 +71,11 @@ async def handle_ingest(request: web.Request) -> web.Response:
         raise web.HTTPConflict(reason=str(exc)) from exc
 
     logger.info(
-        "✓ %s/%s  file  (%d bytes)",
-        device_id, segment, len(payload),
+        "✓ %s/%s  file  (%d bytes%s)",
+        device_id,
+        segment,
+        len(payload),
+        ", skipped empty" if not payload else "",
     )
     return web.Response(status=200, text="ok")
 

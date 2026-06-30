@@ -1134,6 +1134,20 @@ class HttpLogUploader:
             return []
         return sorted(base.rglob("segment_*.jsonl"), key=lambda p: (str(p.parent), p.name))
 
+    def _segment_size(self, path: Path) -> int:
+        try:
+            return int(path.stat().st_size)
+        except OSError:
+            return -1
+
+    def _discard_invalid_segment(self, path: Path, *, reason: str) -> None:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as e:
+            self._logger.warning("Failed to discard invalid segment %s: %s", path.name, e)
+            return
+        self._logger.warning("Discarded invalid segment %s (%s)", path.name, reason)
+
     def _legacy_offset(self, path: Path) -> int:
         with self._lock:
             files = self._state.setdefault("files", {})
@@ -1180,6 +1194,7 @@ class HttpLogUploader:
                 return None
             st = path.stat()
             if st.st_size <= 0:
+                self._discard_invalid_segment(path, reason="empty source file")
                 return None
             # Avoid racing the logger before it has published its active path.
             if time.time() - float(st.st_mtime) < 2.0:
@@ -1193,8 +1208,14 @@ class HttpLogUploader:
                     if not chunk:
                         break
                     dst.write(chunk)
+            if self._segment_size(tmp_path) <= 0:
+                self._discard_invalid_segment(tmp_path, reason="empty gzip output")
+                return None
             tmp_path.replace(gz_path)
             path.unlink()
+            if self._segment_size(gz_path) <= 0:
+                self._discard_invalid_segment(gz_path, reason="empty gzip file")
+                return None
             if legacy_fully_uploaded:
                 self._mark_uploaded(gz_path)
             self._logger.info("Compressed %s -> %s (%d bytes)", path.name, gz_path.name, int(gz_path.stat().st_size))
@@ -1223,6 +1244,8 @@ class HttpLogUploader:
     def _post_file(self, segment: Path) -> None:
         assert self.url is not None
         payload = segment.read_bytes()
+        if not payload:
+            raise ValueError("empty segment file")
         self._logger.info("Uploading %s (%d bytes) to %s", segment.name, len(payload), self.url)
         req = urllib.request.Request(self.url, method="POST", data=payload)
         req.add_header("Content-Type", "application/gzip")
@@ -1251,6 +1274,10 @@ class HttpLogUploader:
                     try:
                         if self._is_uploaded(p):
                             continue
+                        if self._segment_size(p) <= 0:
+                            self._discard_invalid_segment(p, reason="empty gzip file")
+                            did_work = True
+                            continue
                         self._post_file(p)
                         self._mark_uploaded(p)
                         did_work = True
@@ -1259,7 +1286,16 @@ class HttpLogUploader:
                         self._logger.info("Uploaded %s successfully", p.name)
                         # Persist after every confirmed file so retries stay per-file.
                         self._save_state()
+                    except ValueError as e:
+                        self._discard_invalid_segment(p, reason=str(e))
+                        did_work = True
+                        self.last_error = None
                     except (OSError, urllib.error.URLError, urllib.error.HTTPError, RuntimeError) as e:
+                        if isinstance(e, urllib.error.HTTPError) and e.code == 409 and self._segment_size(p) <= 0:
+                            self._discard_invalid_segment(p, reason="collector rejected empty payload")
+                            did_work = True
+                            self.last_error = None
+                            continue
                         self.last_error = str(e)
                         self._logger.warning("Upload failed for %s: %s", p.name, e)
                         break
