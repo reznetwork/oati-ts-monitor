@@ -2,97 +2,104 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Vehicle Monitor - Combined Graph</title>
   <style>
-    body { font-family: Arial, sans-serif; background: #0b1e24; color: #e8f1f2; margin: 0; padding: 0; }
-    header { background: #12313b; padding: 10px 16px 8px 16px; font-size: 20px; position: sticky; top: 0; z-index: 1000; border-bottom: 1px solid #1c3a43; }
-    .topbar-title { display: flex; align-items: center; gap: 10px; }
-    .topbar-status { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 8px; font-size: 13px; align-items: center; }
-    .topbar-log-controls { margin-top: 8px; display: flex; align-items: center; gap: 10px; }
-    .pill { background: #0d1c22; border: 1px solid #1c3a43; border-radius: 999px; padding: 4px 8px; white-space: nowrap; }
-    .status-ok { color: #4caf50; }
-    .status-bad { color: #f44336; }
-    .log-status-on { color: #4caf50; font-weight: 700; }
-    .log-status-off { color: #f44336; font-weight: 700; }
-    .modbus-status-on { color: #4caf50; font-weight: 700; }
-    .modbus-status-off { color: #f44336; font-weight: 700; }
-    .log-btn { height: 34px; border-radius: 8px; border: 1px solid #2a5663; background: linear-gradient(180deg, #1a4b59 0%, #123944 100%); color: #e8f1f2; font-weight: 700; padding: 0 14px; cursor: pointer; }
-    main { padding: 12px 16px 16px 16px; }
-    .card { background: #11232b; border: 1px solid #1c3a43; border-radius: 6px; padding: 12px; }
-    .chart-canvas { width: 100%; height: 420px; background: #0d1c22; border: 1px solid #1c3a43; border-radius: 4px; }
-    .legend { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 10px; font-size: 12px; }
-    .legend-item { display: inline-flex; align-items: center; gap: 6px; }
-    .swatch { width: 14px; height: 3px; border-radius: 2px; display: inline-block; }
-    a { color: #9ad1d4; }
-    .fleet-dd { position: relative; display: inline-flex; align-items: center; gap: 6px; }
-    .fleet-btn {
-      height: 28px;
-      border-radius: 6px;
-      border: 1px solid #2a5663;
-      background: #0d1c22;
-      color: #e8f1f2;
-      padding: 0 10px;
-      cursor: pointer;
-      font-size: 13px;
+    :root {
+      --bg-page: #0b1419; --bg-surface: #0f1b21; --bg-surface-2: #122029; --bg-inset: #0b1419;
+      --border: #1f2e35; --border-strong: #2a3d46;
+      --text-primary: #e7ecee; --text-secondary: #9fb6bd; --text-muted: #5c7178; --accent: #3fb6d8;
+      --success: #7fcf8e; --danger: #e2615a;
     }
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; background: var(--bg-page); color: var(--text-primary); margin: 0; padding: 0; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    header { background: var(--bg-surface); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 1000; padding: 14px 20px 12px; }
+    .topbar-row { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+    .topbar-identity { display: flex; flex-direction: column; min-width: 0; gap: 2px; }
+    .topbar-vehicle-name { font-size: 16px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .topbar-age { color: var(--text-muted); font-size: 12px; }
+    .topbar-status { display: flex; flex-wrap: wrap; gap: 8px; font-size: 12px; align-items: center; flex: 1; }
+    .topbar-right { display: flex; align-items: center; gap: 10px; margin-left: auto; white-space: nowrap; }
+    .pill { background: var(--bg-surface-2); border: 1px solid var(--border); border-radius: 999px; padding: 5px 10px; font-size: 12px; color: var(--text-secondary); display: inline-flex; align-items: center; gap: 5px; }
+    .dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+    .dot-ok { background: var(--success); }
+    .dot-bad { background: var(--danger); }
+
+    .topbar-log-controls { margin-top: 10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .log-status-on  { color: var(--success); font-weight: 600; }
+    .log-status-off { color: var(--danger); font-weight: 600; }
+    .modbus-status-on  { color: var(--success); font-weight: 600; }
+    .modbus-status-off { color: var(--danger); font-weight: 600; }
+    .btn {
+      height: 30px; border-radius: 6px; border: 1px solid var(--border-strong);
+      background: var(--bg-surface-2); color: var(--text-primary); font-weight: 500; font-size: 12px;
+      padding: 0 12px; cursor: pointer;
+    }
+    .btn:hover { background: #16242b; }
+
+    .fleet-dd { position: relative; display: inline-flex; align-items: center; gap: 6px; }
+    .fleet-label { font-size: 12px; color: var(--text-muted); }
+    .fleet-btn { height: 30px; border-radius: 6px; border: 1px solid var(--border-strong); background: var(--bg-surface-2); color: var(--text-primary); padding: 0 12px; cursor: pointer; font-size: 12px; font-weight: 500; }
+    .fleet-btn:hover { background: #16242b; }
     .fleet-menu {
-      position: absolute;
-      top: calc(100% + 6px);
-      left: 0;
-      min-width: 260px;
-      max-height: 320px;
-      overflow: auto;
-      background: #0d1c22;
-      border: 1px solid #2a5663;
-      border-radius: 8px;
-      box-shadow: 0 8px 24px rgba(0,0,0,0.35);
-      padding: 6px;
-      display: none;
-      z-index: 2000;
+      position: absolute; top: calc(100% + 8px); right: 0; min-width: 270px; max-height: 320px; overflow: auto;
+      background: var(--bg-surface-2); border: 1px solid var(--border-strong); border-radius: 10px;
+      box-shadow: 0 12px 28px rgba(0,0,0,0.5); padding: 6px; display: none; z-index: 2000;
     }
     .fleet-menu.open { display: block; }
-    .fleet-item {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-      padding: 8px 10px;
-      border-radius: 6px;
-      color: #e8f1f2;
-      text-decoration: none;
-      font-size: 13px;
-    }
-    .fleet-item:hover { background: #11232b; }
-    .fleet-meta { color: #9ad1d4; font-family: monospace; font-size: 12px; }
+    .fleet-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 10px; border-radius: 6px; color: var(--text-primary); text-decoration: none; font-size: 13px; }
+    .fleet-item:hover { background: var(--bg-surface); text-decoration: none; }
+    .fleet-meta { color: var(--text-muted); font-family: ui-monospace, monospace; font-size: 11px; }
+
+    main { padding: 20px; max-width: 1400px; margin: 0 auto; }
+    .card { background: var(--bg-surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px; }
+    .card h3 { margin: 0 0 4px; font-size: 14px; font-weight: 600; }
+    .card-sub { font-size: 12px; color: var(--text-muted); margin: 0 0 14px; }
+    .chart-canvas { width: 100%; height: 440px; background: var(--bg-inset); border: 1px solid var(--border); border-radius: 8px; display: block; }
+
+    .legend { margin-top: 14px; display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; }
+    .legend-item { display: flex; align-items: center; gap: 8px; font-size: 12px; background: var(--bg-inset); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+    .swatch { width: 12px; height: 3px; border-radius: 2px; flex-shrink: 0; }
+    .legend-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+    .legend-name { color: var(--text-primary); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .legend-meta { color: var(--text-muted); font-size: 11px; }
+    .legend-value { margin-left: auto; color: var(--text-secondary); font-weight: 500; font-variant-numeric: tabular-nums; white-space: nowrap; }
   </style>
 </head>
 <body>
   <header>
-    <div class="topbar-title">
-      Vehicle Monitor — <span id="vehicleName"></span> <small id="age"></small>
-      <label style="margin-left: 10px; font-size: 13px; color:#9ad1d4;">
-        Vehicle:
-        <span class="fleet-dd" id="fleetDd">
+    <div class="topbar-row">
+      <div class="topbar-identity">
+        <span class="topbar-vehicle-name">Combined graph — <span id="vehicleName"></span></span>
+        <span class="topbar-age" id="age"></span>
+      </div>
+      <div class="topbar-status" id="topbarStatus"></div>
+      <div class="topbar-right">
+        <div class="fleet-dd" id="fleetDd">
+          <span class="fleet-label">Switch</span>
           <button id="fleetBtn" class="fleet-btn" type="button">(fleet)</button>
           <div id="fleetMenu" class="fleet-menu" role="menu" aria-label="Fleet"></div>
-        </span>
-      </label>
-      <a href="/">Dashboard</a>
-      <a href="/logs">App logs</a>
-      <a href="/wifilogs">WiFi logs</a>
+        </div>
+        <a href="/" class="btn" style="display:inline-flex;align-items:center;text-decoration:none;">Dashboard</a>
+        <a href="/logs" class="btn" style="display:inline-flex;align-items:center;text-decoration:none;">App logs</a>
+        <a href="/wifilogs" class="btn" style="display:inline-flex;align-items:center;text-decoration:none;">WiFi logs</a>
+      </div>
     </div>
-    <div class="topbar-status" id="topbarStatus"></div>
     <div class="topbar-log-controls">
       <span id="logStatusBadge">Log: OFF</span>
-      <button id="toggleWifiLog" class="log-btn">Start log</button>
+      <button id="toggleWifiLog" class="btn">Start log</button>
       <span id="modbusStatusBadge">Modbus: ON</span>
-      <button id="toggleModbus" class="log-btn">Disable Modbus</button>
+      <button id="toggleModbus" class="btn">Disable Modbus</button>
     </div>
   </header>
   <main>
     <div class="card">
-      <h3>Combined WiFi + Gateway Trend</h3>
-      <canvas id="combinedCanvas" class="chart-canvas" width="1200" height="420"></canvas>
+      <h3>Combined WiFi + gateway trend</h3>
+      <p class="card-sub">Each metric is clamped to a fixed scale (see legend) so values are comparable across vehicles, not just relative to their own min/max.</p>
+      <canvas id="combinedCanvas" class="chart-canvas" width="1200" height="440"></canvas>
       <div class="legend" id="legend"></div>
     </div>
   </main>
@@ -116,10 +123,46 @@
     const FLEET_HTTP_PORT = 9999;
     const onlineByIp = {};
 
-    function sanitizeGraphValue(v) {
-      if (typeof v !== 'number' || Number.isNaN(v) || !Number.isFinite(v)) return null;
-      if (v < -1000) return -1;
-      return v;
+    // Fixed, clamped scales per metric family. Values are clamped to [min, max]
+    // before being mapped to the 0..1 drawing space, so a runaway reading can't
+    // blow out the chart or distort every other line the way auto-normalization did.
+    const SCALES = {
+      wifi_signal:      { min: -100, max: -40,  unit: ' dBm',  label: 'WiFi signal' },
+      wifi_rate:        { min: 0,    max: 600,  unit: ' Mbps', label: 'WiFi TX/RX rate' },
+      wifi_throughput:  { min: 0,    max: 200,  unit: ' Mbps', label: 'WiFi TX/RX throughput' },
+      gateway_latency:  { min: 0,    max: 1000, unit: ' ms',   label: 'Gateway latency' },
+    };
+
+    const GATEWAY_COLORS = ['#e0b34d', '#d85a30', '#7f77dd', '#d4537e', '#3fb6d8'];
+
+    function clampScale(value, scale) {
+      if (typeof value !== 'number' || Number.isNaN(value) || !Number.isFinite(value)) return null;
+      const clamped = Math.min(scale.max, Math.max(scale.min, value));
+      return (clamped - scale.min) / (scale.max - scale.min || 1);
+    }
+
+    function toSeries(raw, mapFn) {
+      const points = (raw || [])
+        .map((p) => ({ ts: p?.ts, value: typeof p?.value === 'number' ? p.value : null }))
+        .filter((p) => typeof p?.ts === 'number' && typeof p?.value === 'number');
+      return mapFn ? points.map((p) => ({ ts: p.ts, value: mapFn(p.value) })) : points;
+    }
+
+    // Converts a cumulative byte counter series into an instantaneous Mbps rate series.
+    function bytesToMbpsRate(series) {
+      if (!Array.isArray(series) || series.length < 2) return [];
+      const out = [];
+      for (let i = 1; i < series.length; i += 1) {
+        const prev = series[i - 1], cur = series[i];
+        if (typeof prev?.value !== 'number' || typeof cur?.value !== 'number') continue;
+        if (typeof prev?.ts !== 'number' || typeof cur?.ts !== 'number') continue;
+        const dt = cur.ts - prev.ts;
+        if (dt <= 0) continue;
+        const deltaBytes = cur.value - prev.value;
+        const mbps = (deltaBytes * 8) / dt / 1_000_000;
+        out.push({ ts: cur.ts, value: Number.isFinite(mbps) ? Math.max(0, mbps) : 0 });
+      }
+      return out;
     }
 
     function latencyMsInt(v) {
@@ -132,15 +175,11 @@
       const name = v?.short_name || v?.name || ip || 'vehicle';
       if (!ip) return `${name} (no ip)`;
       const online = onlineByIp[ip];
-      if (online === true) return `${name} ✅`;
-      if (online === false) return `${name} 🚫`;
+      if (online === true) return `${name} \u2713`;
+      if (online === false) return `${name} \u2717`;
       return `${name} (--)`;
     }
-
-    function fleetNameOnly(v) {
-      return v?.short_name || v?.name || v?.external_ip || '(fleet)';
-    }
-
+    function fleetNameOnly(v) { return v?.short_name || v?.name || v?.external_ip || '(fleet)'; }
     function buildFleetUrl(ip) {
       if (!ip) return null;
       const path = location.pathname || '/combined';
@@ -152,7 +191,6 @@
       const currentIp = fleet.find((v) => v?.short_name && state?.vehicle_short && v.short_name === state.vehicle_short)?.external_ip
         || fleet.find((v) => v?.name && state?.vehicle && v.name === state.vehicle)?.external_ip
         || null;
-
       const current = currentIp ? fleet.find((v) => v?.external_ip === currentIp) : null;
       fleetBtnEl.textContent = current ? fleetNameOnly(current) : '(fleet)';
 
@@ -179,11 +217,8 @@
       try {
         const res = await fetch(`http://${ip}:${FLEET_HTTP_PORT}/ping?ts=${Date.now()}`, { cache: 'no-store' });
         return res && (res.status === 204 || res.ok);
-      } catch (_e) {
-        return false;
-      }
+      } catch (_e) { return false; }
     }
-
     async function scanFleetOnline(state) {
       const fleet = Array.isArray(state?.fleet) ? state.fleet : [];
       const ips = fleet.map((v) => v?.external_ip).filter(Boolean);
@@ -191,85 +226,114 @@
       syncFleetSelector(state);
     }
 
-    function seriesRate(series) {
-      if (!Array.isArray(series) || series.length < 2) return [];
-      const out = [];
-      for (let i = 1; i < series.length; i += 1) {
-        const prev = series[i - 1];
-        const cur = series[i];
-        if (typeof prev?.value !== 'number' || typeof cur?.value !== 'number') continue;
-        if (typeof prev?.ts !== 'number' || typeof cur?.ts !== 'number') continue;
-        const dt = cur.ts - prev.ts;
-        if (dt <= 0) continue;
-        const rate = (cur.value - prev.value) / dt / 1024.0;
-        out.push({ ts: cur.ts, value: sanitizeGraphValue(rate) ?? -1 });
+    function lastValue(series) {
+      for (let i = series.length - 1; i >= 0; i -= 1) {
+        if (typeof series[i]?.value === 'number') return series[i].value;
       }
-      return out;
+      return null;
     }
 
-    function norm(series) {
-      const vals = (series || []).map((p) => sanitizeGraphValue(p?.value)).filter((v) => typeof v === 'number');
-      if (!vals.length) return [];
-      const min = Math.min(...vals);
-      const max = Math.max(...vals);
-      const span = max - min || 1;
-      return (series || [])
-        .map((p) => {
-          const v = sanitizeGraphValue(p?.value);
-          if (typeof v !== 'number' || typeof p?.ts !== 'number') return null;
-          return { ts: p.ts, value: (v - min) / span };
-        })
-        .filter(Boolean);
+    function buildLines(state) {
+      const history = state.history || {};
+      const wifi = history.wifi || {};
+      const lines = [];
+
+      lines.push({
+        name: 'WiFi signal', color: '#3fb6d8', scale: SCALES.wifi_signal,
+        raw: toSeries(wifi.signal_dbm),
+      });
+      lines.push({
+        name: 'WiFi TX rate', color: '#7fcf8e', scale: SCALES.wifi_rate,
+        raw: toSeries(wifi.tx_rate_mbps),
+      });
+      lines.push({
+        name: 'WiFi RX rate', color: '#e0b34d', scale: SCALES.wifi_rate,
+        raw: toSeries(wifi.rx_rate_mbps),
+      });
+      lines.push({
+        name: 'WiFi TX throughput', color: '#7f77dd', scale: SCALES.wifi_throughput,
+        raw: bytesToMbpsRate(toSeries(wifi.tx_bytes)),
+      });
+      lines.push({
+        name: 'WiFi RX throughput', color: '#d4537e', scale: SCALES.wifi_throughput,
+        raw: bytesToMbpsRate(toSeries(wifi.rx_bytes)),
+      });
+
+      const gatewayEntries = Object.entries(history.gateway_latency || {});
+      gatewayEntries.forEach(([name, series], i) => {
+        lines.push({
+          name: `${name} latency`, color: GATEWAY_COLORS[i % GATEWAY_COLORS.length], scale: SCALES.gateway_latency,
+          raw: toSeries(series),
+        });
+      });
+
+      return lines.filter((l) => l.raw.length);
     }
 
     function drawCombined(state) {
       const ctx = canvas.getContext('2d');
-      const w = canvas.width;
-      const h = canvas.height;
+      const w = canvas.width, h = canvas.height;
       ctx.clearRect(0, 0, w, h);
-      ctx.fillStyle = '#0d1c22';
+      ctx.fillStyle = '#0b1419';
       ctx.fillRect(0, 0, w, h);
 
-      const history = state.history || {};
-      const wifi = history.wifi || {};
-      const gatewaySeries = Object.values(history.gateway_latency || {})[0] || [];
-      const lines = [
-        { name: 'WiFi signal', color: '#03a9f4', data: norm(wifi.signal_dbm || []) },
-        { name: 'WiFi TX rate', color: '#8bc34a', data: norm(wifi.tx_rate_mbps || []) },
-        { name: 'WiFi RX rate', color: '#cddc39', data: norm(wifi.rx_rate_mbps || []) },
-        { name: 'WiFi TX throughput', color: '#00acc1', data: norm(seriesRate(wifi.tx_bytes || [])) },
-        { name: 'WiFi RX throughput', color: '#8e24aa', data: norm(seriesRate(wifi.rx_bytes || [])) },
-        { name: 'Gateway latency', color: '#ff9800', data: norm(gatewaySeries) },
-      ];
+      const lines = buildLines(state);
 
-      let all = [];
-      for (const line of lines) all = all.concat(line.data);
-      if (!all.length) {
-        ctx.fillStyle = '#9e9e9e';
-        ctx.font = '14px sans-serif';
-        ctx.fillText('no data', 12, 24);
-      } else {
-        const tsMin = Math.min(...all.map((p) => p.ts));
-        const tsMax = Math.max(...all.map((p) => p.ts));
-        const tsSpan = tsMax - tsMin || 1;
-        for (const line of lines) {
-          if (!line.data.length) continue;
-          ctx.strokeStyle = line.color;
-          ctx.lineWidth = 2;
-          ctx.beginPath();
-          line.data.forEach((p, i) => {
-            const x = ((p.ts - tsMin) / tsSpan) * (w - 20) + 10;
-            const y = h - 10 - (p.value * (h - 20));
-            if (i === 0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
-          });
-          ctx.stroke();
-        }
+      let allTs = [];
+      lines.forEach((l) => { allTs = allTs.concat(l.raw.map((p) => p.ts)); });
+
+      if (!allTs.length) {
+        ctx.fillStyle = '#5c7178';
+        ctx.font = '13px sans-serif';
+        ctx.fillText('no data', 14, 26);
+        legendEl.innerHTML = '';
+        return;
       }
 
-      legendEl.innerHTML = lines
-        .map((l) => `<span class="legend-item"><span class="swatch" style="background:${l.color}"></span>${l.name}</span>`)
-        .join('');
+      const tsMin = Math.min(...allTs);
+      const tsMax = Math.max(...allTs);
+      const tsSpan = tsMax - tsMin || 1;
+      const padL = 10, padR = 10, padT = 10, padB = 10;
+
+      // Reference gridlines at 0/25/50/75/100% of the clamped scale band.
+      ctx.strokeStyle = '#162830';
+      ctx.lineWidth = 1;
+      for (let i = 0; i <= 4; i += 1) {
+        const y = padT + (h - padT - padB) * (i / 4);
+        ctx.beginPath();
+        ctx.moveTo(padL, y);
+        ctx.lineTo(w - padR, y);
+        ctx.stroke();
+      }
+
+      lines.forEach((line) => {
+        const points = line.raw
+          .map((p) => ({ ts: p.ts, frac: clampScale(p.value, line.scale) }))
+          .filter((p) => typeof p.frac === 'number');
+        if (!points.length) return;
+        ctx.strokeStyle = line.color;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        points.forEach((p, i) => {
+          const x = padL + ((p.ts - tsMin) / tsSpan) * (w - padL - padR);
+          const y = h - padB - p.frac * (h - padT - padB);
+          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+      });
+
+      legendEl.innerHTML = lines.map((line) => {
+        const last = lastValue(line.raw);
+        const valTxt = last === null ? '--' : `${last.toFixed(1)}${line.scale.unit}`;
+        return `<div class="legend-item">
+          <span class="swatch" style="background:${line.color}"></span>
+          <span class="legend-text">
+            <span class="legend-name">${line.name}</span>
+            <span class="legend-meta">${line.scale.min} to ${line.scale.max}${line.scale.unit}, clamped</span>
+          </span>
+          <span class="legend-value">${valTxt}</span>
+        </div>`;
+      }).join('');
     }
 
     function renderTopbarStatus(state) {
@@ -277,18 +341,18 @@
       const latency = state.display_latency || {};
       const gateway = latency.gateway || Object.values(latency)[0];
       if (gateway) {
-        const cls = gateway.status === 'OK' ? 'status-ok' : 'status-bad';
-        pills.push(`<span class="pill">gateway: <span class="${cls}">${gateway.status || '--'}</span> ${latencyMsInt(gateway.latency_ms)}</span>`);
+        const ok = gateway.status === 'OK';
+        pills.push(`<span class="pill"><span class="dot ${ok ? 'dot-ok' : 'dot-bad'}"></span>gateway ${latencyMsInt(gateway.latency_ms)}</span>`);
       }
       for (const [name, info] of Object.entries(state.controllers || {})) {
-        const cls = info.status === 'OK' ? 'status-ok' : 'status-bad';
-        pills.push(`<span class="pill">${name}: <span class="${cls}">${info.status || '--'}</span> ${latencyMsInt(info.latency)}</span>`);
+        const ok = info.status === 'OK';
+        pills.push(`<span class="pill"><span class="dot ${ok ? 'dot-ok' : 'dot-bad'}"></span>${name} ${latencyMsInt(info.latency)}</span>`);
       }
       const gnss = state.gnss || {};
-      pills.push(`<span class="pill">GNSS: ${gnss.fix || '--'}</span>`);
+      pills.push(`<span class="pill">GNSS ${gnss.fix || '--'}</span>`);
       const wifi = state.wifi || {};
       const level = wifi.signal || (typeof wifi.signal_dbm === 'number' ? `${Math.round(wifi.signal_dbm)} dBm` : '--');
-      pills.push(`<span class="pill">WiFi: ${wifi.ssid || '--'} ${level}</span>`);
+      pills.push(`<span class="pill">${wifi.ssid || 'wifi'} ${level}</span>`);
       topbarStatusEl.innerHTML = pills.join('');
 
       const logCfg = state.detailed_wifi_logging || {};
@@ -327,9 +391,7 @@
       ws.onclose = () => setTimeout(connect, 2000);
     }
 
-    fleetBtnEl.onclick = () => {
-      fleetMenuEl.classList.toggle('open');
-    };
+    fleetBtnEl.onclick = () => { fleetMenuEl.classList.toggle('open'); };
     document.addEventListener('click', (ev) => {
       if (!fleetDdEl.contains(ev.target)) fleetMenuEl.classList.remove('open');
     });
@@ -338,7 +400,6 @@
       if (!wsConn || wsConn.readyState !== WebSocket.OPEN) return;
       wsConn.send(JSON.stringify({ type: 'set_detailed_wifi_logging', enabled: !currentLogEnabled }));
     };
-
     toggleModbusBtn.onclick = () => {
       if (!wsConn || wsConn.readyState !== WebSocket.OPEN) return;
       wsConn.send(JSON.stringify({ type: 'set_modbus_enabled', enabled: !currentModbusEnabled }));
