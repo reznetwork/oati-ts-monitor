@@ -58,10 +58,10 @@ def _run_log_command(cmd: List[str], *, timeout: float = 8.0) -> Tuple[List[str]
     try:
         res = subprocess.run(
             cmd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
             timeout=timeout,
-            stderr=subprocess.STDOUT,
         )
         output = [ln for ln in (res.stdout or "").splitlines() if ln]
         if res.returncode != 0:
@@ -79,10 +79,10 @@ def _resolve_docker_container(docker: str, name: str) -> Tuple[Optional[str], Op
     try:
         res = subprocess.run(
             [docker, "ps", "-a", "--filter", f"name={name}", "--format", "{{.Names}}"],
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
             timeout=8,
-            stderr=subprocess.STDOUT,
         )
         if res.returncode != 0:
             err = (res.stdout or "").strip() or f"docker ps failed (exit {res.returncode})"

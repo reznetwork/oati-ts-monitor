@@ -4,6 +4,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import logging
 import os
 import queue
 import socket
@@ -20,6 +21,8 @@ from core.state import AppState
 
 FULL_LOG_SCHEMA_VERSION = 1
 FULL_LOG_COMPRESSED_SUFFIX = ".jsonl.gz"
+
+_log = logging.getLogger(__name__)
 
 class DataLogger:
     def __init__(self, state: AppState, vehicle: VehicleCfg, log_file: Optional[str], interval: Optional[float]):
@@ -371,6 +374,7 @@ class HttpLogUploader:
     def start(self) -> None:
         if not self.enabled or not self.url:
             return
+        _log.info("HTTP log upload enabled: url=%s device_id=%s base_dir=%s", self.url, self.device_id, self.base_dir)
         self._load_state()
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
@@ -488,6 +492,7 @@ class HttpLogUploader:
             return gz_path
         except OSError as e:
             self.last_error = str(e)
+            _log.warning("Failed to compress log segment %s: %s", path.name, e)
             return None
 
     def _compress_backlog(self) -> None:
@@ -509,6 +514,12 @@ class HttpLogUploader:
     def _post_file(self, segment: Path) -> None:
         assert self.url is not None
         payload = segment.read_bytes()
+        _log.info(
+            "Uploading log segment %s (%d bytes) to %s",
+            segment.name,
+            len(payload),
+            self.url,
+        )
         req = urllib.request.Request(self.url, method="POST", data=payload)
         req.add_header("Content-Type", "application/gzip")
         req.add_header("X-Log-Compression", "gzip")
@@ -523,6 +534,7 @@ class HttpLogUploader:
             code = int(getattr(resp, "status", 200))
             if code < 200 or code >= 300:
                 raise RuntimeError(f"upload failed: HTTP {code}")
+        _log.info("Uploaded log segment %s (%d bytes), HTTP %d", segment.name, len(payload), code)
 
     def _loop(self) -> None:
         backoff = 0.5
@@ -545,12 +557,14 @@ class HttpLogUploader:
                         self._save_state()
                     except (OSError, urllib.error.URLError, urllib.error.HTTPError, RuntimeError) as e:
                         self.last_error = str(e)
+                        _log.warning("Upload failed for %s: %s", p.name, e)
                         break
                 if not did_work:
                     if self.stop_event.wait(1.0):
                         break
             except Exception as e:
                 self.last_error = str(e)
+                _log.error("Log upload loop error: %s", e)
             # Backoff on errors
             if self.last_error:
                 if self.stop_event.wait(backoff):
