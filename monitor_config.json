@@ -2,7 +2,7 @@
   "pymodbus": {
     "port": 502,
     "timeout": 2.5,
-    "pollIntervalSec": 0.2,
+    "pollIntervalSec": 0.1,
     "unitCandidates": [
       1,
       255,
@@ -1268,7 +1268,7 @@
   },
   "logging": {
     "appLogFile": "logs/app.log",
-    "appLogLevel": "WARNING",
+    "appLogLevel": "INFO",
     "full": {
       "enabled": true,
       "dir": "logs/full",

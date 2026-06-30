@@ -1064,19 +1064,30 @@ class HttpLogUploader:
         self.stop_event = threading.Event()
         self.thread: Optional[threading.Thread] = None
         self.last_error: Optional[str] = None
+        self._logger = logging.getLogger("upload")
         self._lock = threading.Lock()
         self._state: Dict[str, Any] = {"v": 2, "uploaded": {}, "files": {}}
 
     def start(self) -> None:
-        if not self.enabled or not self.url:
+        if not self.enabled:
+            return
+        if not self.url:
+            self._logger.warning("HTTP log upload enabled but no upload URL configured")
             return
         self._load_state()
+        self._logger.info(
+            "HTTP log upload started (url=%s, device_id=%s, base_dir=%s)",
+            self.url,
+            self.device_id,
+            self.base_dir,
+        )
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
 
     def stop(self) -> None:
         self.stop_event.set()
         if self.thread:
+            self._logger.info("Stopping HTTP log upload")
             self.thread.join(timeout=2)
         self._save_state()
 
@@ -1184,9 +1195,11 @@ class HttpLogUploader:
             path.unlink()
             if legacy_fully_uploaded:
                 self._mark_uploaded(gz_path)
+            self._logger.info("Compressed %s -> %s (%d bytes)", path.name, gz_path.name, int(gz_path.stat().st_size))
             return gz_path
         except OSError as e:
             self.last_error = str(e)
+            self._logger.warning("Failed to compress segment %s: %s", path.name, e)
             return None
 
     def _compress_backlog(self) -> None:
@@ -1208,6 +1221,7 @@ class HttpLogUploader:
     def _post_file(self, segment: Path) -> None:
         assert self.url is not None
         payload = segment.read_bytes()
+        self._logger.info("Uploading %s (%d bytes) to %s", segment.name, len(payload), self.url)
         req = urllib.request.Request(self.url, method="POST", data=payload)
         req.add_header("Content-Type", "application/gzip")
         req.add_header("X-Log-Compression", "gzip")
@@ -1240,16 +1254,19 @@ class HttpLogUploader:
                         did_work = True
                         backoff = 0.5
                         self.last_error = None
+                        self._logger.info("Uploaded %s successfully", p.name)
                         # Persist after every confirmed file so retries stay per-file.
                         self._save_state()
                     except (OSError, urllib.error.URLError, urllib.error.HTTPError, RuntimeError) as e:
                         self.last_error = str(e)
+                        self._logger.warning("Upload failed for %s: %s", p.name, e)
                         break
                 if not did_work:
                     if self.stop_event.wait(1.0):
                         break
             except Exception as e:
                 self.last_error = str(e)
+                self._logger.error("Upload loop error: %s", e)
             # Backoff on errors
             if self.last_error:
                 if self.stop_event.wait(backoff):
@@ -2833,10 +2850,10 @@ def _run_log_command(cmd: List[str], *, timeout: float = 8.0) -> Tuple[List[str]
     try:
         res = subprocess.run(
             cmd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
             timeout=timeout,
-            stderr=subprocess.STDOUT,
         )
         output = [ln for ln in (res.stdout or "").splitlines() if ln]
         if res.returncode != 0:
@@ -2854,10 +2871,10 @@ def _resolve_docker_container(docker: str, name: str) -> Tuple[Optional[str], Op
     try:
         res = subprocess.run(
             [docker, "ps", "-a", "--filter", f"name={name}", "--format", "{{.Names}}"],
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
             timeout=8,
-            stderr=subprocess.STDOUT,
         )
         if res.returncode != 0:
             err = (res.stdout or "").strip() or f"docker ps failed (exit {res.returncode})"
