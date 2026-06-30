@@ -153,43 +153,198 @@ except ModuleNotFoundError:  # pragma: no cover
 # UTF-8 for Russian labels
 locale.setlocale(locale.LC_ALL, '')
 
-from core.config import (
-    DEFAULT_COILS_FALLBACK,
-    DEFAULT_MODBUS_PORT,
-    DEFAULT_POLL_INTERVAL_SEC,
-    DEFAULT_TIMEOUT,
-    DEFAULT_UNIT_CANDIDATES,
-    AppCfg,
-    ControllerCfg,
-    PointCfg,
-    VehicleCfg,
-    load_config,
-    pick_vehicle,
-    write_default_config,
-)
-from core.state import AppState
-from core.tui_utils import (
-    Colors,
-    STYLE_COLORS,
-    _format_coord,
-    _last_numeric,
-    _sparkline,
-    addstr_clip,
-    infer_style,
-)
-from services.modbus import (
-    MAX_MODBUS_REF_SPAN,
-    call_bits,
-    chunk_refs_by_span,
-    logical_state,
-    refs_to_block,
-)
-from services.polling import RECONNECT_MAX_PER_WINDOW, RECONNECT_WINDOW_SEC
-from services.system import check_tcp, silence_lib_logs
-from services.wifi import get_wifi_status
-from services.system import get_cpu_load
+# ---------------- Defaults ----------------
+DEFAULT_POLL_INTERVAL_SEC = 1.0
+DEFAULT_MODBUS_PORT = 502
+DEFAULT_TIMEOUT = 2.5
+DEFAULT_UNIT_CANDIDATES = [1, 255, 0]
+DEFAULT_COILS_FALLBACK = True
+MAX_MODBUS_REF_SPAN = 100  # Modbus read 'count' upper bound per request
+HISTORY_WINDOW_SEC = 600
+
+# Reconnect rate limiting (prevents controller-side session buildup if user spams reconnect)
+RECONNECT_WINDOW_SEC = 30.0
+RECONNECT_MAX_PER_WINDOW = 3
+
+# ---------------- Data models ----------------
+@dataclass
+class PointCfg:
+    ref: int
+    label: str
+    invert: bool = False
+    style: Optional[str] = None  # handbrake | seatbelt | engine | indicator | default
+
+@dataclass
+class ControllerCfg:
+    name: str
+    host: str
+    base: int
+    points: List[PointCfg] = field(default_factory=list)
+    gear_points: Dict[int, str] = field(default_factory=dict)
+    extra_points: Dict[int, str] = field(default_factory=dict)
+    model: Optional[str] = None
+
+@dataclass
+class VehicleCfg:
+    name: str
+    controllers: List[ControllerCfg]
+
+@dataclass
+class AppCfg:
+    port: int = DEFAULT_MODBUS_PORT
+    timeout: float = DEFAULT_TIMEOUT
+    poll_interval_sec: float = DEFAULT_POLL_INTERVAL_SEC
+    unit_candidates: List[int] = field(default_factory=lambda: DEFAULT_UNIT_CANDIDATES[:])
+    coils_fallback: bool = DEFAULT_COILS_FALLBACK
+    gnss_host: Optional[str] = None
+    gnss_port: Optional[int] = None
+    wifi_iface: Optional[str] = None
+    wifi_refresh: Optional[float] = None
+    display_latency_hosts: List[Tuple[str, str, int]] = field(default_factory=list)
+    vehicles: List[VehicleCfg] = field(default_factory=list)
 
 
+class AppState:
+    def __init__(self, vehicle: VehicleCfg, appcfg: AppCfg):
+        self.vehicle = vehicle
+        self.appcfg = appcfg
+        self.lock = threading.RLock()
+        self.update_event = threading.Event()
+        self.log_event = threading.Event()
+        self.modbus_enabled: bool = True
+        self.controllers: Dict[str, Dict[str, Any]] = {}
+        self.gnss: Optional[Dict[str, Any]] = None
+        self.wifi: Optional[Dict[str, Any]] = None
+        self.cpu_load: Optional[float] = None
+        self.display_latency: Dict[str, Dict[str, Any]] = {}
+        self.last_update: float = 0.0
+        self.history: Dict[str, Any] = {
+            "modbus_latency": {},
+            "gateway_latency": {},
+            "wifi": {
+                "signal_dbm": deque(),
+                "tx_rate_mbps": deque(),
+                "rx_rate_mbps": deque(),
+            },
+            "cpu_load": deque(),
+        }
+
+        for cfg in self.vehicle.controllers:
+            point_meta = {}
+            for p in cfg.points:
+                style_name = infer_style(p.label, p.style)
+                point_meta[str(p.ref)] = {
+                    "label": p.label,
+                    "style": style_name,
+                    "di": p.ref - cfg.base,
+                }
+            self.controllers[cfg.name] = {
+                "host": cfg.host,
+                "base": cfg.base,
+                "model": cfg.model,
+                "status": "INIT",
+                "latency": None,
+                "debug": "",
+                "points": {},
+                "points_meta": point_meta,
+                "gears": {},
+                "extra": {},
+            }
+
+    def _append_history(self, series: deque, value: Optional[float], now: Optional[float] = None) -> None:
+        if value is None:
+            return
+        ts = now if now is not None else time.time()
+        series.append({"ts": ts, "value": value})
+        cutoff = ts - HISTORY_WINDOW_SEC
+        while series and series[0]["ts"] < cutoff:
+            series.popleft()
+
+    def _history_snapshot(self) -> Dict[str, Any]:
+        modbus_latency = {name: list(series) for name, series in self.history["modbus_latency"].items()}
+        gateway_latency = {name: list(series) for name, series in self.history["gateway_latency"].items()}
+        wifi_history = {
+            "signal_dbm": list(self.history["wifi"]["signal_dbm"]),
+            "tx_rate_mbps": list(self.history["wifi"]["tx_rate_mbps"]),
+            "rx_rate_mbps": list(self.history["wifi"]["rx_rate_mbps"]),
+        }
+        cpu_load = list(self.history["cpu_load"])
+        return {
+            "modbus_latency": modbus_latency,
+            "gateway_latency": gateway_latency,
+            "wifi": wifi_history,
+            "cpu_load": cpu_load,
+        }
+
+    def snapshot(self) -> Dict[str, Any]:
+        with self.lock:
+            return {
+                "controllers": jsonlib.loads(jsonlib.dumps(self.controllers)),
+                "gnss": jsonlib.loads(jsonlib.dumps(self.gnss)) if self.gnss is not None else None,
+                "wifi": jsonlib.loads(jsonlib.dumps(self.wifi)) if self.wifi is not None else None,
+                "cpu_load": self.cpu_load,
+                "display_latency": jsonlib.loads(jsonlib.dumps(self.display_latency)),
+                "modbus": {"enabled": bool(self.modbus_enabled)},
+                "history": self._history_snapshot(),
+                "last_update": self.last_update,
+                "vehicle": self.vehicle.name,
+            }
+
+    def set_modbus_enabled(self, enabled: bool) -> None:
+        with self.lock:
+            self.modbus_enabled = bool(enabled)
+            self.last_update = time.time()
+            self.update_event.set()
+
+    def set_controller(self, name: str, **kwargs):
+        with self.lock:
+            if name not in self.controllers:
+                self.controllers[name] = {}
+            self.controllers[name].update(kwargs)
+            if "latency" in kwargs:
+                series = self.history["modbus_latency"].setdefault(name, deque())
+                self._append_history(series, kwargs.get("latency"))
+            self.last_update = time.time()
+            self.update_event.set()
+            self.log_event.set()
+
+    def set_gnss(self, snap: Optional[Dict[str, Any]]):
+        with self.lock:
+            self.gnss = snap
+            self.last_update = time.time()
+            self.update_event.set()
+            self.log_event.set()
+
+    def set_wifi(self, snap: Optional[Dict[str, Any]]):
+        with self.lock:
+            self.wifi = snap
+            if snap:
+                self._append_history(self.history["wifi"]["signal_dbm"], snap.get("signal_dbm"))
+                self._append_history(self.history["wifi"]["tx_rate_mbps"], snap.get("tx_rate_mbps"))
+                self._append_history(self.history["wifi"]["rx_rate_mbps"], snap.get("rx_rate_mbps"))
+            self.last_update = time.time()
+            self.update_event.set()
+            self.log_event.set()
+
+    def set_display_latency(self, data: Dict[str, Dict[str, Any]]):
+        with self.lock:
+            self.display_latency = data
+            now = time.time()
+            for name, info in data.items():
+                series = self.history["gateway_latency"].setdefault(name, deque())
+                latency_ms = info.get("latency_ms")
+                self._append_history(series, latency_ms, now=now)
+            self.last_update = time.time()
+            self.update_event.set()
+            self.log_event.set()
+
+    def set_cpu_load(self, load: Optional[float]):
+        with self.lock:
+            self.cpu_load = load
+            self._append_history(self.history["cpu_load"], load)
+            self.last_update = time.time()
+            self.update_event.set()
+            self.log_event.set()
 
 
 class DataLogger:
@@ -316,6 +471,338 @@ class DataLogger:
             self.last_error = f"open failed: {e}"
             self.active = False
 
+# ---------------- Config loader ----------------
+def _as_int_keys(d: Dict[str, Any]) -> Dict[int, str]:
+    out: Dict[int, str] = {}
+    for k, v in d.items():
+        try:
+            out[int(k)] = str(v)
+        except Exception:
+            continue
+    return out
+
+
+def _as_positive_float(value: Any, default: float) -> float:
+    try:
+        parsed = float(value)
+        if parsed > 0:
+            return parsed
+    except Exception:
+        pass
+    return float(default)
+
+
+def load_config(path: str) -> AppCfg:
+    with open(path, 'r', encoding='utf-8') as f:
+        raw = json.load(f)
+
+    modbus_cfg = raw.get('pymodbus', {}) or {}
+    modbus_port = int(modbus_cfg.get('port', DEFAULT_MODBUS_PORT))
+    timeout = float(modbus_cfg.get('timeout', DEFAULT_TIMEOUT))
+    poll_interval_sec = _as_positive_float(
+        modbus_cfg.get('pollIntervalSec', modbus_cfg.get('pollInterval', modbus_cfg.get('pollSeconds'))),
+        DEFAULT_POLL_INTERVAL_SEC,
+    )
+    unit_candidates = list(modbus_cfg.get('unitCandidates', DEFAULT_UNIT_CANDIDATES))
+    coils_fallback = bool(modbus_cfg.get('coilsFallback', DEFAULT_COILS_FALLBACK))
+    gnss_cfg = raw.get('gnss', {}) or {}
+    gnss_host = gnss_cfg.get('host')
+    gnss_port = gnss_cfg.get('port')
+    gnss_port_int = int(gnss_port) if gnss_port is not None else None
+
+    wifi_cfg = raw.get('wifi', {}) or {}
+    wifi_iface = str(wifi_cfg.get('interface')).strip() if wifi_cfg.get('interface') else None
+    wifi_refresh_raw = wifi_cfg.get('refreshSeconds')
+    try:
+        wifi_refresh = float(wifi_refresh_raw) if wifi_refresh_raw is not None else None
+    except Exception:
+        wifi_refresh = None
+    if wifi_refresh is not None and wifi_refresh <= 0:
+        wifi_refresh = None
+
+    display_cfg = raw.get('display', {}) or {}
+    latency_hosts_cfg = display_cfg.get('latencyHosts', []) or []
+    latency_hosts: List[Tuple[str, str, int]] = []
+    for entry in latency_hosts_cfg:
+        try:
+            name = str(entry.get('name') or entry.get('label') or entry.get('host') or 'host')
+            host = str(entry['host'])
+            host_port = int(entry.get('port', modbus_port))
+            latency_hosts.append((name, host, host_port))
+        except Exception:
+            continue
+
+    vehicles: List[VehicleCfg] = []
+    for v in raw.get('vehicles', []):
+        ctrls: List[ControllerCfg] = []
+        for c in v.get('controllers', []):
+            points: List[PointCfg] = []
+            for p in c.get('points', []):
+                points.append(PointCfg(ref=int(p['ref']), label=str(p['label']), invert=bool(p.get('invert', False)), style=p.get('style')))
+            gear = _as_int_keys(c.get('gear_points', {}))
+            extra = _as_int_keys(c.get('extra_points', {}))
+            ctrls.append(ControllerCfg(
+                name=str(c.get('name', c.get('host', 'ctrl'))),
+                host=str(c['host']),
+                base=int(c['base']),
+                points=points,
+                gear_points=gear,
+                extra_points=extra,
+                model=c.get('model')
+            ))
+        vehicles.append(VehicleCfg(name=str(v.get('name', 'vehicle')), controllers=ctrls))
+
+    return AppCfg(
+        port=modbus_port,
+        timeout=timeout,
+        poll_interval_sec=poll_interval_sec,
+        unit_candidates=unit_candidates,
+        coils_fallback=coils_fallback,
+        gnss_host=str(gnss_host) if gnss_host else None,
+        gnss_port=gnss_port_int,
+        wifi_iface=wifi_iface,
+        wifi_refresh=wifi_refresh,
+        display_latency_hosts=latency_hosts,
+        vehicles=vehicles,
+    )
+
+# --- Auto-bootstrap default config if missing ---
+def write_default_config(path: str) -> None:
+    default = {
+        "pymodbus": {
+            "port": DEFAULT_MODBUS_PORT,
+            "timeout": DEFAULT_TIMEOUT,
+            "pollIntervalSec": DEFAULT_POLL_INTERVAL_SEC,
+            "unitCandidates": DEFAULT_UNIT_CANDIDATES,
+            "coilsFallback": DEFAULT_COILS_FALLBACK,
+        },
+        "gnss": {"host": "192.168.1.50", "port": 2947},
+        "wifi": {"interface": "wlp2s0", "refreshSeconds": 2},
+        "display": {"latencyHosts": [{"name": "gateway", "host": "192.168.1.1"}]},
+        "vehicles": [
+            {
+                "name": "Tractor A",
+                "controllers": [
+                    {
+                        "name": "MB_IO_1",
+                        "model": "ICPDAS ET-7002",
+                        "host": "172.16.102.4",
+                        "base": 10000,
+                        "points": [
+                            {"ref": 10001, "label": "Ручник",    "invert": False, "style": "handbrake"},
+                            {"ref": 10002, "label": "Ремень",    "invert": True,  "style": "seatbelt"},
+                            {"ref": 10003, "label": "Двигатель", "invert": True,  "style": "engine"}
+                        ]
+                    },
+                    {
+                        "name": "MB_IO_2",
+                        "model": "ICPDAS ET-7051",
+                        "host": "172.16.102.5",
+                        "base": 10000,
+                        "points": [
+                            {"ref": 10000, "label": "тормоз"},
+                            {"ref": 10002, "label": "левый поворотник",  "style": "indicator"},
+                            {"ref": 10003, "label": "правый поворотник", "style": "indicator"},
+                            {"ref": 10005, "label": "ближний свет"},
+                            {"ref": 10009, "label": "Гудок"}
+                        ]
+                    },
+                    {
+                        "name": "MB_IO_3",
+                        "host": "172.16.102.8",
+                        "base": 10001,
+                        "gear_points": {
+                            "10001": "N", "10002": "F1", "10003": "F2", "10004": "F3", "10005": "F4",
+                            "10006": "F5", "10007": "F6", "10008": "F7", "10009": "F8", "10010": "F9",
+                            "10021": "R1", "10022": "R2"
+                        },
+                        "extra_points": {"10023": "&&"}
+                    }
+                ]
+            }
+        ]
+    }
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(default, f, ensure_ascii=False, indent=2)
+# ---------------- Helpers ----------------
+
+def silence_lib_logs(verbose: bool) -> None:
+    """Suppress noisy pymodbus logs that can corrupt the ncurses screen.
+    By default we silence to CRITICAL; with --verbose we relax to ERROR.
+    """
+    root_level = logging.WARNING if verbose else logging.ERROR
+    logging.basicConfig(level=root_level)
+    for name in ("pymodbus", "pymodbus.client", "pymodbus.transaction", "pymodbus.framer", "pymodbus.factory"):
+        lg = logging.getLogger(name)
+        # prevent propagation to root to avoid stderr spam
+        lg.propagate = False
+        # clear existing handlers attached by the lib/env and add a NullHandler
+        try:
+            lg.handlers.clear()
+        except Exception:
+            lg.handlers = []
+        lg.addHandler(logging.NullHandler())
+        lg.setLevel(logging.CRITICAL if not verbose else logging.ERROR)
+
+def refs_to_block(refs: List[int], base: int) -> Tuple[int, int]:
+    addresses = sorted([ref - base for ref in refs])
+    start = addresses[0]
+    end = addresses[-1]
+    count = end - start + 1
+    return start, count
+
+def chunk_refs_by_span(refs: List[int], max_span: int) -> List[List[int]]:
+    """
+    Split refs into chunks where (max(ref) - min(ref) + 1) <= max_span.
+    This bounds the Modbus 'count' computed by refs_to_block().
+    """
+    uniq = sorted(set(refs))
+    if not uniq:
+        return []
+    chunks: List[List[int]] = []
+    start = uniq[0]
+    cur: List[int] = [start]
+    for r in uniq[1:]:
+        if r - start + 1 <= max_span:
+            cur.append(r)
+        else:
+            chunks.append(cur)
+            start = r
+            cur = [r]
+    chunks.append(cur)
+    return chunks
+
+
+def logical_state(invert: bool, raw: Optional[bool]) -> Optional[bool]:
+    if raw is None:
+        return None
+    return (not raw) if invert else raw
+
+def check_tcp(host: str, port: int, timeout: float) -> Tuple[bool, Optional[float], Optional[str]]:
+    start = time.perf_counter()
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            end = time.perf_counter()
+            return True, (end - start) * 1000.0, None
+    except Exception as e:
+        etxt = f"{e.__class__.__name__}: {e}"
+        if isinstance(e, TimeoutError):
+            return False, None, "timeout"
+        if isinstance(e, ConnectionRefusedError):
+            return False, None, "refused"
+        if isinstance(e, OSError) and "No route" in str(e):
+            return False, None, "no route"
+        return False, None, etxt
+
+
+def _freq_to_channel(freq_mhz: Optional[int]) -> Optional[int]:
+    if freq_mhz is None:
+        return None
+    if 2412 <= freq_mhz <= 2472:
+        return (freq_mhz - 2407) // 5
+    if freq_mhz == 2484:
+        return 14
+    if 5000 <= freq_mhz <= 5900:
+        return (freq_mhz - 5000) // 5
+    return None
+
+
+def get_wifi_status(interface: str) -> Dict[str, Optional[Any]]:
+    """Return WiFi link details parsed from `iw dev <iface> link` output."""
+    cmd = ["iw", "dev", interface, "link"]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+    except Exception as e:
+        return {"status": "error", "error": f"exec failed: {e}"}
+
+    stdout = (res.stdout or "").strip()
+    stderr = (res.stderr or "").strip()
+    if res.returncode != 0:
+        msg = stderr or stdout or "iw failed"
+        return {"status": "down", "error": msg}
+    if not stdout or "Not connected" in stdout:
+        return {"status": "no link"}
+
+    ssid = None
+    bssid = None
+    signal = None
+    freq = None
+    signal_dbm: Optional[float] = None
+    tx_rate_mbps: Optional[float] = None
+    rx_rate_mbps: Optional[float] = None
+    for line in stdout.splitlines():
+        line = line.strip()
+        if line.startswith("Connected to"):
+            parts = line.split()
+            if len(parts) >= 3:
+                bssid = parts[2]
+        elif line.startswith("SSID:"):
+            ssid = line.split(":", 1)[1].strip() or None
+        elif line.startswith("freq:"):
+            try:
+                freq = int(line.split(":", 1)[1].strip())
+            except Exception:
+                freq = None
+        elif line.startswith("signal:"):
+            match = re.search(r"(-?\d+\s*dBm)", line)
+            if match:
+                signal = match.group(1)
+                try:
+                    signal_dbm = float(match.group(1).split()[0])
+                except Exception:
+                    signal_dbm = None
+        elif "bitrate:" in line:
+            match = re.search(r"^(tx|rx)\s+bitrate:\s*([0-9.]+)\s*MBit/s", line)
+            if match:
+                rate = float(match.group(2))
+                if match.group(1) == "tx":
+                    tx_rate_mbps = rate
+                else:
+                    rx_rate_mbps = rate
+
+    chan = _freq_to_channel(freq)
+    freq_txt = f"{freq} MHz" if freq is not None else None
+    if chan is not None:
+        freq_txt = f"{freq_txt} (ch {chan})" if freq_txt else f"ch {chan}"
+
+    status = {
+        "status": "connected",
+        "ssid": ssid,
+        "bssid": bssid,
+        "signal": signal,
+        "signal_dbm": signal_dbm,
+        "freq": freq_txt,
+        "tx_rate_mbps": tx_rate_mbps,
+        "rx_rate_mbps": rx_rate_mbps,
+    }
+    return status
+
+
+def get_cpu_load() -> Optional[float]:
+    try:
+        load1, _, _ = os.getloadavg()
+        return float(load1)
+    except Exception:
+        return None
+
+# ---------------- Pymodbus call helper ----------------
+def call_bits(method, address: int, count: int, unit: int):
+    """Robust call into pymodbus 3.11.x (address positional; others keyword-only)."""
+    try:
+        rr = method(address, count=count, slave=unit)
+        return rr, None
+    except TypeError as e1:
+        try:
+            rr = method(address, count=count, unit=unit)
+            return rr, None
+        except TypeError as e2:
+            try:
+                rr = method(address, count=count)
+                return rr, None
+            except Exception as e3:
+                return None, f"kw variants failed: slave({e1}); unit({e2}); no-unit({e3.__class__.__name__}: {e3})"
+    except Exception as e:
+        return None, f"call error: {e.__class__.__name__}: {e}"
 
 # ---------------- Modbus client wrapper ----------------
 class MBClient:
@@ -448,6 +935,13 @@ def _nmea_to_deg(raw: str, direction: str) -> Optional[float]:
         return deg
     except Exception:
         return None
+
+
+def _format_coord(deg: Optional[float], pos: str, neg: str) -> Optional[str]:
+    if deg is None:
+        return None
+    hemi = pos if deg >= 0 else neg
+    return f"{abs(deg):.4f} {hemi}"
 
 
 class GNSSClient:
@@ -754,6 +1248,80 @@ class Poller:
             self.thread.join(timeout=2)
 
 # ---------------- UI helpers ----------------
+def addstr_clip(win, y: int, x: int, text: str, attr: int = 0):
+    max_x = curses.COLS - 1
+    if y >= curses.LINES:
+        return
+    if x < 0:
+        text = text[-x:]
+        x = 0
+    if x > max_x:
+        return
+    if x + len(text) > max_x:
+        text = text[:max(0, max_x - x)]
+    try:
+        win.addstr(y, x, text, attr)
+    except curses.error:
+        pass
+
+SPARK_CHARS = "▁▂▃▄▅▆▇█"
+
+def _sparkline(series: List[Dict[str, Any]], width: int) -> str:
+    if width <= 0:
+        return ""
+    values = [item.get("value") for item in series if isinstance(item, dict) and isinstance(item.get("value"), (int, float))]
+    if not values:
+        return "no data"
+    values = values[-width:]
+    min_val = min(values)
+    max_val = max(values)
+    span = max_val - min_val
+    if span == 0:
+        return SPARK_CHARS[-1] * len(values)
+    chars = []
+    for val in values:
+        idx = int(round((val - min_val) / span * (len(SPARK_CHARS) - 1)))
+        chars.append(SPARK_CHARS[idx])
+    return "".join(chars)
+
+def _last_numeric(series: List[Dict[str, Any]]) -> Optional[float]:
+    for item in reversed(series):
+        val = item.get("value") if isinstance(item, dict) else None
+        if isinstance(val, (int, float)):
+            return val
+    return None
+
+# Color policy
+class Colors:
+    GREEN = 1
+    RED = 2
+    YELLOW = 3
+    CYAN = 4
+    MAGENTA = 5
+    WHITE = 6
+
+# Style → (ON color, OFF color)
+STYLE_COLORS = {
+    'handbrake': (Colors.RED, Colors.GREEN),      # Ручник
+    'seatbelt':  (Colors.GREEN, Colors.RED),      # Ремень
+    'engine':    (Colors.GREEN, Colors.RED),      # Двигатель
+    'indicator': (Colors.YELLOW, Colors.WHITE),   # поворотники
+    'default':   (Colors.GREEN, 0),               # generic
+}
+
+def infer_style(label: str, explicit: Optional[str]) -> str:
+    if explicit:
+        return explicit
+    l = label.lower()
+    if 'ручник' in l:
+        return 'handbrake'
+    if 'ремень' in l:
+        return 'seatbelt'
+    if 'двигател' in l:
+        return 'engine'
+    if 'поворотник' in l:
+        return 'indicator'
+    return 'default'
 
 # ---------------- TUI ----------------
 class TUI:
@@ -1230,6 +1798,23 @@ def parse_args():
     return args
 
 
+def pick_vehicle(appcfg: AppCfg, selector: Optional[str]) -> VehicleCfg:
+    if not appcfg.vehicles:
+        raise SystemExit("No vehicles found in config")
+    if selector is None:
+        return appcfg.vehicles[0]
+    # try index
+    try:
+        idx = int(selector)
+        if 1 <= idx <= len(appcfg.vehicles):
+            return appcfg.vehicles[idx - 1]
+    except Exception:
+        pass
+    # try name
+    for v in appcfg.vehicles:
+        if v.name == selector:
+            return v
+    raise SystemExit(f"Vehicle '{selector}' not found")
 
 
 def main():
