@@ -2,7 +2,7 @@
   "pymodbus": {
     "port": 502,
     "timeout": 2.5,
-    "pollIntervalSec": 0.1,
+    "pollIntervalSec": 0.2,
     "unitCandidates": [
       1,
       255,
@@ -16,7 +16,7 @@
   },
   "wifi": {
     "interface": "wlan0",
-    "refreshSeconds": 1,
+    "refreshSeconds": 2,
     "detailedLogFile": "wifilogs"
   },
   "display": {
