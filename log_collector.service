@@ -1,0 +1,22 @@
+[Unit]
+Description=oati-ts-monitor log collector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/srv/oati-ts-monitor
+ExecStart=/usr/bin/python3 -m log_collector \
+  --bind 0.0.0.0 \
+  --port 9000 \
+  --data-dir /var/lib/oati-ts-monitor/received_logs
+
+Restart=always
+RestartSec=2
+
+# Helpful for debugging: view logs with `journalctl -u log_collector.service -f`
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
