@@ -426,8 +426,9 @@ async def handle_dashboard(request: web.Request) -> web.Response:
 # App factory
 # ---------------------------------------------------------------------------
 
-def make_app(storage: ChunkStorage) -> web.Application:
-    app = web.Application()
+def make_app(storage: ChunkStorage, *, max_upload_bytes: int = 16 * 1024 * 1024) -> web.Application:
+    # aiohttp defaults to 1 MiB; daemon segments can produce larger gzip files.
+    app = web.Application(client_max_size=max(1024 * 1024, int(max_upload_bytes)))
     app["storage"] = storage
     app["start_mono"] = time.monotonic()
 

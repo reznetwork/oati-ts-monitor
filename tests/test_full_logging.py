@@ -10,8 +10,11 @@ import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
+from aiohttp.test_utils import TestClient, TestServer
+
 from daemon_services import AppCfg, AppState, FullFidelityLogger, HttpLogUploader, VehicleCfg
 from http_header_text import decode_http_header_text
+from log_collector.server import make_app
 from log_collector.storage import ChunkStorage
 
 
@@ -187,6 +190,33 @@ class TestFullLogging(unittest.TestCase):
                 self.assertEqual(gzip.decompress(stored.read_bytes()), raw)
                 records = await storage.read_segment_tail("dev1", "v1", "segment_1710000000000_0.jsonl.gz", 10)
                 self.assertEqual(records, [{"a": 1}, {"a": 2}])
+
+        asyncio.run(_run())
+
+    def test_log_collector_accepts_payload_larger_than_aiohttp_default_limit(self):
+        async def _run():
+            with tempfile.TemporaryDirectory() as td:
+                storage = ChunkStorage(td)
+                app = make_app(storage)
+                payload = gzip.compress(b"x" * (1024 * 1024 + 128))
+                headers = {
+                    "Content-Type": "application/gzip",
+                    "X-Log-Compression": "gzip",
+                    "X-Schema-Version": "1",
+                    "X-Device-Id": "dev1",
+                    "X-Vehicle": "vehicle",
+                    "X-Vehicle-Short": "v1",
+                    "X-Log-Segment": "segment_large_0.jsonl.gz",
+                    "X-File-Bytes": str(len(payload)),
+                    "X-File-Sha256": hashlib.sha256(payload).hexdigest(),
+                }
+                async with TestClient(TestServer(app)) as client:
+                    resp = await client.post("/ingest", data=payload, headers=headers)
+                    self.assertEqual(resp.status, 200)
+
+                stored = Path(td) / "dev1" / "v1" / "segment_large_0.jsonl.gz"
+                self.assertTrue(stored.exists())
+                self.assertEqual(len(stored.read_bytes()), len(payload))
 
         asyncio.run(_run())
 

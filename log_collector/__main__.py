@@ -37,6 +37,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--log-level", default="INFO",
                    choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                    help="Application log level")
+    p.add_argument("--max-upload-bytes", type=int, default=16 * 1024 * 1024, metavar="BYTES",
+                   help="Maximum accepted POST body size for /ingest")
     return p
 
 
@@ -54,7 +56,7 @@ def main() -> int:
         logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
 
     storage = ChunkStorage(args.data_dir)
-    app = make_app(storage)
+    app = make_app(storage, max_upload_bytes=args.max_upload_bytes)
 
     print(
         f"\n  oati-ts-monitor Log Collector\n"
