@@ -24,6 +24,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from http_header_text import encode_http_header_text
+
 try:
     import jinja2
 except ModuleNotFoundError:  # pragma: no cover
@@ -1226,9 +1228,9 @@ class HttpLogUploader:
         req.add_header("Content-Type", "application/gzip")
         req.add_header("X-Log-Compression", "gzip")
         req.add_header("X-Schema-Version", str(FULL_LOG_SCHEMA_VERSION))
-        req.add_header("X-Device-Id", self.device_id)
-        req.add_header("X-Vehicle", self.vehicle)
-        req.add_header("X-Vehicle-Short", self.vehicle_short)
+        req.add_header("X-Device-Id", encode_http_header_text(self.device_id))
+        req.add_header("X-Vehicle", encode_http_header_text(self.vehicle))
+        req.add_header("X-Vehicle-Short", encode_http_header_text(self.vehicle_short))
         req.add_header("X-Log-Segment", segment.name)
         req.add_header("X-File-Bytes", str(len(payload)))
         req.add_header("X-File-Sha256", self._sha256_file(segment))

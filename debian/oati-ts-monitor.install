@@ -5,6 +5,7 @@ client.py usr/lib/oati-ts-monitor/
 client_runtime.py usr/lib/oati-ts-monitor/
 monitor.py usr/lib/oati-ts-monitor/
 ipc_protocol.py usr/lib/oati-ts-monitor/
+http_header_text.py usr/lib/oati-ts-monitor/
 templates usr/lib/oati-ts-monitor/
 log_collector usr/lib/oati-ts-monitor/
 wifilog_viewer usr/lib/oati-ts-monitor/

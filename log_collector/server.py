@@ -24,6 +24,7 @@ from typing import Any
 from aiohttp import web
 
 from .storage import ChunkStorage
+from http_header_text import decode_http_header_text
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +38,9 @@ async def handle_ingest(request: web.Request) -> web.Response:
 
     # Required headers
     try:
-        device_id   = request.headers["X-Device-Id"]
-        vehicle     = request.headers.get("X-Vehicle", "")
-        vehicle_short = request.headers.get("X-Vehicle-Short", "") or vehicle
+        device_id   = decode_http_header_text(request.headers["X-Device-Id"])
+        vehicle     = decode_http_header_text(request.headers.get("X-Vehicle", ""))
+        vehicle_short = decode_http_header_text(request.headers.get("X-Vehicle-Short", "")) or vehicle
         segment     = request.headers["X-Log-Segment"]
         file_bytes  = int(request.headers["X-File-Bytes"])
         sha256      = request.headers.get("X-File-Sha256", "")

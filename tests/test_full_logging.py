@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from daemon_services import AppCfg, AppState, FullFidelityLogger, HttpLogUploader, VehicleCfg
+from http_header_text import decode_http_header_text
 from log_collector.storage import ChunkStorage
 
 
@@ -114,6 +115,53 @@ class TestFullLogging(unittest.TestCase):
                 st = json.loads(state_file.read_text(encoding="utf-8"))
                 self.assertIn("uploaded", st)
                 self.assertIn(str(gz_seg), st["uploaded"])
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+
+    def test_http_uploader_encodes_unicode_vehicle_header(self):
+        with tempfile.TemporaryDirectory() as td:
+            base_dir = Path(td) / "full"
+            vehicle_short = "segway_villain"
+            day = "20260101"
+            seg_dir = base_dir / vehicle_short / day
+            seg_dir.mkdir(parents=True, exist_ok=True)
+            seg = seg_dir / "segment_1710000000000_0.jsonl"
+            seg.write_bytes(b'{"a":1}\n')
+            old = time.time() - 10.0
+            os.utime(seg, (old, old))
+
+            _IngestHandler.received = b""
+            _IngestHandler.headers_seen = {}
+            httpd = HTTPServer(("127.0.0.1", 0), _IngestHandler)
+            port = httpd.server_address[1]
+            t = threading.Thread(target=httpd.serve_forever, daemon=True)
+            t.start()
+            try:
+                uploader = HttpLogUploader(
+                    enabled=True,
+                    base_dir=str(base_dir),
+                    url=f"http://127.0.0.1:{port}/ingest",
+                    device_id="dev1",
+                    chunk_bytes=256 * 1024,
+                    state_file=str(Path(td) / "upload_state.json"),
+                    vehicle="Багги Segway Villain SSV",
+                    vehicle_short=vehicle_short,
+                )
+                uploader.start()
+                deadline = time.time() + 3.0
+                while time.time() < deadline:
+                    with _IngestHandler.lock:
+                        if _IngestHandler.received:
+                            break
+                    time.sleep(0.05)
+                uploader.stop()
+
+                with _IngestHandler.lock:
+                    headers = dict(_IngestHandler.headers_seen)
+                vehicle_header = headers.get("X-Vehicle", "")
+                vehicle_header.encode("latin-1")
+                self.assertEqual(decode_http_header_text(vehicle_header), "Багги Segway Villain SSV")
             finally:
                 httpd.shutdown()
                 httpd.server_close()
