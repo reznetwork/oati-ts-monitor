@@ -521,8 +521,8 @@
           "name": "MB_IO_1",
           "model": null,
           "host": "172.16.109.4",
-          "connectRateLimit": { "maxPerWindow": 15, "windowSec": 60 },
-          "base": 0,
+          "connectRateLimit": { "maxPerWindow": 10, "windowSec": 60 },
+          "base": 10000,
           "points": [
             {
               "ref": 10000,
