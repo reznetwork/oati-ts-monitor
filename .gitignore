@@ -1,2 +1,7 @@
 monitor_config.json
 *.jsonl
+*.ino
+.DS_Store
+*.log
+*.log.*
+__pycache__
