@@ -229,6 +229,10 @@ The daemon/client use a single JSON config file (default: `monitor_config.json`)
       - `base` (int): Modbus “base” used to convert `ref` to a displayed DI number
         - the UI displays `DI{ref-base}`
       - `model` (optional string): shown in UI
+      - `connectRateLimit` (optional object): overrides the Modbus `connect()` rate limiter for this controller
+        - `maxPerWindow` (int): max connect attempts allowed per window (default `10`)
+        - `windowSec` (number): window length in seconds (default `60`)
+        - protects the controller's session limit from reconnect storms; when exceeded, further `connect()` calls are rejected until the window rolls forward
       - `points` (array of discrete inputs to monitor)
         - each point: `{ "ref": <int>, "label": "<text>", "invert": <bool>, "style": "<optional>" }`
         - `ref` is the Modbus address reference (absolute ref); the code reads from `ref` using the controller `base`

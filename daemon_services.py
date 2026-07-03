@@ -89,8 +89,10 @@ RECONNECT_WINDOW_SEC = 30.0
 RECONNECT_MAX_PER_WINDOW = 3
 
 # Per-controller connect() spam guard (protects controller's 12-session hard limit)
+# Default is 10 connections per 60s; individual controllers may override this via
+# their `connectRateLimit` config block (see ControllerCfg / load_config).
 CLIENT_CONNECT_WINDOW_SEC = 60.0
-CLIENT_CONNECT_MAX_PER_WINDOW = 5
+CLIENT_CONNECT_MAX_PER_WINDOW = 10
 
 
 class MirrorPassthroughDataBlock:
@@ -390,6 +392,10 @@ class ControllerCfg:
     passthrough_gears: Dict[int, str] = field(default_factory=dict)
     passthrough_extra: Dict[int, str] = field(default_factory=dict)
     model: Optional[str] = None
+    # Per-controller override for the Modbus connect() rate limiter. `None` means
+    # "use the global default" (see CLIENT_CONNECT_MAX_PER_WINDOW / _WINDOW_SEC).
+    connect_rate_limit_max: Optional[int] = None
+    connect_rate_limit_window_sec: Optional[float] = None
 
 
 @dataclass
@@ -1533,6 +1539,30 @@ def _as_positive_float(value: Any, default: float) -> float:
     return float(default)
 
 
+def _as_optional_positive_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+        if parsed > 0:
+            return parsed
+    except Exception:
+        pass
+    return None
+
+
+def _as_optional_positive_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+        if parsed > 0:
+            return parsed
+    except Exception:
+        pass
+    return None
+
+
 def load_config(path: str) -> AppCfg:
     with open(path, "r", encoding="utf-8") as f:
         raw = json.load(f)
@@ -1578,6 +1608,9 @@ def load_config(path: str) -> AppCfg:
                 )
                 for p in c.get("points", [])
             ]
+            rate_limit_cfg = c.get("connectRateLimit", c.get("connect_rate_limit", {})) or {}
+            rate_limit_max = rate_limit_cfg.get("maxPerWindow", rate_limit_cfg.get("max_per_window"))
+            rate_limit_window = rate_limit_cfg.get("windowSec", rate_limit_cfg.get("window_sec"))
             ctrls.append(
                 ControllerCfg(
                     name=str(c.get("name", c.get("host", "ctrl"))),
@@ -1589,6 +1622,8 @@ def load_config(path: str) -> AppCfg:
                     passthrough_gears=_as_int_keys(c.get("passthrough_gears", {})),
                     passthrough_extra=_as_int_keys(c.get("passthrough_extra", {})),
                     model=c.get("model"),
+                    connect_rate_limit_max=_as_optional_positive_int(rate_limit_max),
+                    connect_rate_limit_window_sec=_as_optional_positive_float(rate_limit_window),
                 )
             )
         bridge_mappings: List[BridgeMappingCfg] = []
@@ -2619,13 +2654,18 @@ class Poller:
         self.status = {}
         self.debug_msgs = {}
         for cfg in self.vehicle.controllers:
+            guard_kwargs: Dict[str, Any] = {}
+            if cfg.connect_rate_limit_max is not None:
+                guard_kwargs["max_per_window"] = cfg.connect_rate_limit_max
+            if cfg.connect_rate_limit_window_sec is not None:
+                guard_kwargs["window_sec"] = cfg.connect_rate_limit_window_sec
             self.clients[cfg.name] = MBClient(
                 cfg.host,
                 self.args.port,
                 self.args.timeout,
                 self.args.unit_candidates,
                 self.args.coils,
-                guard=ConnectionGuard(host=str(cfg.host), modbus_port=int(self.args.port)),
+                guard=ConnectionGuard(host=str(cfg.host), modbus_port=int(self.args.port), **guard_kwargs),
                 logger=logging.getLogger(f"modbus.{cfg.name}"),
             )
 

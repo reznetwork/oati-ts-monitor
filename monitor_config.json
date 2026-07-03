@@ -695,6 +695,11 @@
           "name": "MB_IO_3",
           "model": "Modbus контроллер КПП",
           "host": "172.16.102.8",
+          "connectRateLimit": 
+          { 
+            "maxPerWindow": 15, 
+            "windowSec": 60 
+          },
           "base": 10001,
           "gear_points": {
             "10001": "N",
