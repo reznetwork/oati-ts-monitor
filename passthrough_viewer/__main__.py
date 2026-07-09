@@ -12,6 +12,65 @@ from daemon_services import load_config, pick_vehicle, silence_lib_logs
 from .reader import PassthroughEntry, PassthroughReader, build_vehicle_sources
 
 
+def _format_vehicle_list(appcfg) -> str:
+    lines: List[str] = []
+    for i, v in enumerate(getattr(appcfg, "vehicles", []) or [], start=1):
+        short = getattr(v, "short_name", None) or ""
+        name = getattr(v, "name", None) or ""
+        ip = getattr(v, "external_ip", None) or ""
+        label = f"{i:>2}) {short}"
+        if name and name != short:
+            label += f" — {name}"
+        if ip:
+            label += f" (externalIp={ip})"
+        lines.append(label)
+    return "\n".join(lines) if lines else "(no vehicles found in config)"
+
+
+def _resolve_config_path_from_argv(argv: List[str]) -> str:
+    # argparse help can be invoked before parsing all args; scan raw argv.
+    for i, tok in enumerate(argv):
+        if tok in ("-c", "--config"):
+            if i + 1 < len(argv):
+                return str(argv[i + 1])
+    return "monitor_config.json"
+
+
+def _argv_has_any(argv: List[str], flags: List[str]) -> bool:
+    return any(f in argv for f in flags)
+
+
+def _interactive_select_vehicle(appcfg) -> str:
+    vehicles = getattr(appcfg, "vehicles", []) or []
+    if not vehicles:
+        raise SystemExit("No vehicles found in config")
+    print("Available vehicles:")
+    print(_format_vehicle_list(appcfg))
+    while True:
+        try:
+            raw = input(f"Select vehicle (1-{len(vehicles)} or name): ").strip()
+        except EOFError:
+            raw = ""
+        if raw == "":
+            return "1"
+        return raw
+
+
+class _HelpWithVehicles(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        raw_argv = sys.argv[1:]
+        cfg_path = _resolve_config_path_from_argv(raw_argv)
+        extra = ""
+        try:
+            appcfg = load_config(cfg_path)
+            extra = "\nAvailable vehicles (from --config):\n" + _format_vehicle_list(appcfg) + "\n"
+        except Exception as e:
+            extra = f"\n(Unable to load vehicles from config '{cfg_path}': {e})\n"
+        parser.print_help()
+        sys.stdout.write(extra)
+        raise SystemExit(0)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="passthrough_viewer",
@@ -19,9 +78,12 @@ def _build_parser() -> argparse.ArgumentParser:
             "Connect to the oati-ts-monitor Modbus/TCP passthrough mirror and display unified "
             "passthrough values (FC02 discrete inputs, with FC01 coils fallback)."
         ),
+        add_help=False,
     )
+    ap.add_argument("-h", "--help", nargs=0, action=_HelpWithVehicles, help="Show this help message and exit")
     ap.add_argument("--config", "-c", default="monitor_config.json", help="Path to monitor_config.json")
     ap.add_argument("--vehicle", "-v", default=None, help="Vehicle name, shortName, or 1-based index (for source labels)")
+    ap.add_argument("vehicle_pos", nargs="?", default=None, help="Vehicle selector (name, shortName, or 1-based index)")
     ap.add_argument("--host", default="127.0.0.1", help="Modbus/TCP host (daemon passthrough bind target)")
     ap.add_argument("--port", type=int, default=None, help="Modbus/TCP port (default: passthrough.port from config)")
     ap.add_argument("--unit", type=int, default=None, help="Modbus unit id (default: passthrough.unitId from config)")
@@ -161,7 +223,8 @@ def watch_until_quit(
 
 def main(argv: Optional[List[str]] = None) -> int:
     ap = _build_parser()
-    args = ap.parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    args = ap.parse_args(raw_argv)
     silence_lib_logs(args.verbose)
 
     appcfg = load_config(args.config)
@@ -171,22 +234,69 @@ def main(argv: Optional[List[str]] = None) -> int:
             file=sys.stderr,
         )
 
-    port = int(args.port if args.port is not None else appcfg.passthrough.port)
-    unit = int(args.unit if args.unit is not None else appcfg.passthrough.unit_id)
-    timeout = float(args.timeout if args.timeout is not None else appcfg.timeout)
     groups = dict(appcfg.passthrough.groups)
     if not groups:
         ap.error("No passthrough.groups found in config")
 
+    # Unify vehicle selector (flag or positional).
+    if args.vehicle is None and getattr(args, "vehicle_pos", None) is not None:
+        args.vehicle = args.vehicle_pos
+
     vehicle = None
     sources: Dict[str, str] = {}
-    if args.vehicle is not None:
-        vehicle = pick_vehicle(appcfg, args.vehicle)
-        sources = build_vehicle_sources(vehicle)
-        if not args.group:
-            # Avoid querying global passthrough slots this vehicle does not map.
-            groups = {name: addr for name, addr in groups.items() if name in sources}
+    if args.vehicle is None:
+        # If no vehicle was provided, prompt interactively.
+        args.vehicle = _interactive_select_vehicle(appcfg)
+
+    # If only a vehicle was specified (no host/port/watch/read-mode flags), make startup simpler:
+    # - host: from vehicle.externalIp (monitor_config.json)
+    # - port: 502
+    # - watch: enabled
+    # - interval: pymodbus.pollIntervalSec * 2
+    # - read-mode: multi
+    only_vehicle_mode = not _argv_has_any(
+        raw_argv,
+        [
+            "--host",
+            "--port",
+            "--unit",
+            "--timeout",
+            "--group",
+            "-g",
+            "--watch",
+            "-w",
+            "--interval",
+            "--no-clear",
+            "--json",
+            "--verbose",
+            "--no-coils",
+            "--read-mode",
+        ],
+    )
+
+    vehicle = pick_vehicle(appcfg, args.vehicle)
+    sources = build_vehicle_sources(vehicle)
+
+    if only_vehicle_mode:
+        if not _argv_has_any(raw_argv, ["--host"]) and getattr(vehicle, "external_ip", None):
+            args.host = str(vehicle.external_ip)
+        if not _argv_has_any(raw_argv, ["--port"]):
+            args.port = 502
+        if not _argv_has_any(raw_argv, ["--watch", "-w"]):
+            args.watch = True
+        if not _argv_has_any(raw_argv, ["--interval"]):
+            args.interval = appcfg.poll_interval_sec * 2
+        if not _argv_has_any(raw_argv, ["--read-mode"]):
+            args.read_mode = "multi"
+
+    if not args.group:
+        # Avoid querying global passthrough slots this vehicle does not map.
+        groups = {name: addr for name, addr in groups.items() if name in sources}
     entries = _build_entries(groups, args.group, sources)
+
+    port = int(args.port if args.port is not None else appcfg.passthrough.port)
+    unit = int(args.unit if args.unit is not None else appcfg.passthrough.unit_id)
+    timeout = float(args.timeout if args.timeout is not None else appcfg.timeout)
 
     reader = PassthroughReader(
         args.host,

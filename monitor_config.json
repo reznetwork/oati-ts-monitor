@@ -310,6 +310,7 @@
             {
               "ref": 10001,
               "label": "Вилы подняты > 30см",
+              "invert": true,
               "passthrough": "lift:up"
             },
             {
