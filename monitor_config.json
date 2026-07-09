@@ -923,6 +923,12 @@
               "label": "Ближний свет",
               "style": "light",
               "passthrough": "light_low"
+            },
+            {
+              "ref": 10257,
+              "label": "Двигатель",
+              "style": "engine",
+              "passthrough": "engine"
             }
           ]
         },
@@ -958,12 +964,6 @@
               "ref": 10007,
               "label": "Правый назад",
               "passthrough": "trackR:R"
-            },
-            {
-              "ref": 10013,
-              "label": "Двигатель",
-              "style": "engine",
-              "passthrough": "engine"
             }
           ]
         }
