@@ -1319,11 +1319,22 @@ class HttpLogUploader:
 
 
 class DetailedWifiLogger:
-    def __init__(self, state: AppState, log_file: Optional[str]):
+    """
+    Extensive Wi-Fi/roaming logger. This is always-on (no manual toggle required):
+    it starts capturing as soon as the daemon starts, writes local per-session
+    JSONL files under ``wifilogs`` (used by the local map viewer / `/wifilogs`
+    browser), and, when a `FullFidelityLogger` is attached, mirrors every sample
+    and roaming event into the always-on full-state log stream so the same data
+    rides along in the compressed, rotated segments that get uploaded to the
+    remote log collector for analysis/viewing off-vehicle.
+    """
+
+    def __init__(self, state: AppState, log_file: Optional[str], full_logger: Optional["FullFidelityLogger"] = None):
         self.state = state
         configured = Path(log_file).expanduser() if log_file else Path("wifilogs")
         self.log_dir = (configured.parent / "wifilogs") if configured.suffix else configured
         self.enabled = False
+        self.full_logger = full_logger
         self.last_error: Optional[str] = None
         self.stop_event = threading.Event()
         self.queue: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=4096)
@@ -1331,11 +1342,16 @@ class DetailedWifiLogger:
         self.lock = threading.Lock()
         self.current_session_file: Optional[Path] = None
 
+    def attach_full_logger(self, full_logger: Optional["FullFidelityLogger"]) -> None:
+        self.full_logger = full_logger
+
     def start(self):
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
         self.state.set_detailed_wifi_logging(enabled=False, file=None, last_error=None)
+        # Extensive Wi-Fi logging is permanently enabled; no UI/IPC toggle needed.
+        self.set_enabled(True)
 
     def stop(self):
         self.stop_event.set()
@@ -1382,32 +1398,31 @@ class DetailedWifiLogger:
                     }
                 except Exception:
                     continue
-        self._put(
-            {
-                "type": "wifi_sample",
-                "ts_ms": ts_ms,
-                "_session_file": session_file,
-                "vehicle": self.state.vehicle.name,
-                "vehicle_short": self.state.vehicle.short_name,
-                "wifi": {
-                    "tx_rate_mbps": wifi.get("tx_rate_mbps"),
-                    "rx_rate_mbps": wifi.get("rx_rate_mbps"),
-                    "tx_bytes": wifi.get("tx_bytes"),
-                    "rx_bytes": wifi.get("rx_bytes"),
-                    "rssi_dbm": wifi.get("rssi_dbm"),
-                    "signal": wifi.get("signal"),
-                    "signal_avg_dbm": wifi.get("signal_avg_dbm"),
-                    "noise_dbm": wifi.get("noise_dbm"),
-                    "bssid": wifi.get("bssid"),
-                    "channel": wifi.get("channel"),
-                    "beacon_loss_count": wifi.get("beacon_loss_count"),
-                    "max_probe_tries": wifi.get("max_probe_tries"),
-                    "bssid_change_ms": wifi.get("bssid_change_ms"),
-                },
-                "gnss": gnss,
-                "gateways": gateways_out or None,
-            }
-        )
+        record = {
+            "type": "wifi_sample",
+            "ts_ms": ts_ms,
+            "vehicle": self.state.vehicle.name,
+            "vehicle_short": self.state.vehicle.short_name,
+            "wifi": {
+                "tx_rate_mbps": wifi.get("tx_rate_mbps"),
+                "rx_rate_mbps": wifi.get("rx_rate_mbps"),
+                "tx_bytes": wifi.get("tx_bytes"),
+                "rx_bytes": wifi.get("rx_bytes"),
+                "rssi_dbm": wifi.get("rssi_dbm"),
+                "signal": wifi.get("signal"),
+                "signal_avg_dbm": wifi.get("signal_avg_dbm"),
+                "noise_dbm": wifi.get("noise_dbm"),
+                "bssid": wifi.get("bssid"),
+                "channel": wifi.get("channel"),
+                "beacon_loss_count": wifi.get("beacon_loss_count"),
+                "max_probe_tries": wifi.get("max_probe_tries"),
+                "bssid_change_ms": wifi.get("bssid_change_ms"),
+            },
+            "gnss": gnss,
+            "gateways": gateways_out or None,
+        }
+        self._put({**record, "_session_file": session_file})
+        self._mirror_to_full_log("wifi_sample", record, ts_ms)
 
     def enqueue_roaming_event(self, event_type: str, details: Dict[str, Any], gnss: Optional[Dict[str, Any]], ts_ms: int):
         with self.lock:
@@ -1415,18 +1430,29 @@ class DetailedWifiLogger:
             session_file = str(self.current_session_file) if self.current_session_file else None
         if not enabled or not session_file:
             return
-        self._put(
-            {
-                "type": "roaming_event",
-                "event": event_type,
-                "ts_ms": ts_ms,
-                "_session_file": session_file,
-                "vehicle": self.state.vehicle.name,
-                "vehicle_short": self.state.vehicle.short_name,
-                "details": details,
-                "gnss": gnss,
-            }
-        )
+        record = {
+            "type": "roaming_event",
+            "event": event_type,
+            "ts_ms": ts_ms,
+            "vehicle": self.state.vehicle.name,
+            "vehicle_short": self.state.vehicle.short_name,
+            "details": details,
+            "gnss": gnss,
+        }
+        self._put({**record, "_session_file": session_file})
+        self._mirror_to_full_log("wifi_roaming_event", record, ts_ms)
+
+    def _mirror_to_full_log(self, kind: str, record: Dict[str, Any], ts_ms: int) -> None:
+        """Combine this extensive Wi-Fi record into the always-on full state log
+        stream, so it is rotated/compressed/uploaded alongside the rest of the
+        vehicle's full-fidelity data and can be reviewed remotely."""
+        full_logger = self.full_logger
+        if full_logger is None:
+            return
+        try:
+            full_logger.enqueue_event(kind, record, ts_ms=ts_ms)
+        except Exception:
+            pass
 
     def _put(self, payload: Dict[str, Any]) -> None:
         try:
@@ -2622,8 +2648,10 @@ class Poller:
         event_details.update(details)
         self.detailed_wifi_logger.enqueue_roaming_event(event_type, event_details, self.state.gnss_snapshot(), ts_ms)
 
-    def set_detailed_wifi_logging(self, enabled: bool) -> None:
-        self.detailed_wifi_logger.set_enabled(enabled)
+    def attach_full_logger(self, full_logger: Optional["FullFidelityLogger"]) -> None:
+        """Wire the always-on full-fidelity logger so extensive Wi-Fi samples and
+        roaming events are combined into the same uploaded log stream."""
+        self.detailed_wifi_logger.attach_full_logger(full_logger)
 
     def set_modbus_enabled(self, enabled: bool) -> None:
         enabled = bool(enabled)
@@ -3175,11 +3203,6 @@ class WebServer:
                         body = jsonlib.loads(msg.data)
                     except Exception:
                         body = {}
-                    if body.get("type") == "set_detailed_wifi_logging":
-                        enabled = bool(body.get("enabled"))
-                        if self.poller:
-                            self.poller.set_detailed_wifi_logging(enabled)
-                        await ws.send_json({"type": "ack", "command": "set_detailed_wifi_logging", "ok": True, "enabled": enabled})
                     if body.get("type") == "set_modbus_enabled":
                         enabled = bool(body.get("enabled"))
                         if self.poller:

@@ -271,9 +271,10 @@ The daemon maintains a live `state` snapshot and rolling history (charts) for:
    - These values are also tracked in the rolling history for charting.
    - When BSSID changes, the daemon computes `bssid_change_ms` in the live state snapshot.
 
-5. **Detailed Wi‑Fi/roaming logging mode**
-   - The web dashboard can toggle this mode at runtime.
-   - While enabled, daemon writes JSONL records into one file per capture session inside `wifilogs`.
+5. **Extensive Wi‑Fi/roaming logging**
+   - Always on — no dashboard toggle or manual action needed; it starts capturing as soon as the daemon starts.
+   - The daemon writes JSONL records into one file per daemon run inside `wifilogs` (used by the local map viewer and the dashboard's `/wifilogs` browser).
+   - It is also combined into the always-on full-fidelity log (see below) as `event` records with `kind` `wifi_sample` / `wifi_roaming_event`, so the same data rides along in the rotated/compressed segments and is uploaded to the remote log collector when `--upload`/`upload.enabled` is on — enabling remote analysis/viewing without touching the vehicle.
    - Record types:
      - `wifi_sample`: link rates/signal/noise/BSSID/channel/counters, GNSS snapshot, `ts_ms`
      - `roaming_event`: roaming event (`search`, `selection`, `attachment`, `cold_reconnection`), raw details, GNSS snapshot, `ts_ms`

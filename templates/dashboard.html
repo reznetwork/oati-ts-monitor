@@ -206,7 +206,6 @@
     .btn-link:hover { background: #16242b; text-decoration: none; }
     .settings-row-logs { flex-wrap: wrap; }
     .log-link-group { display: flex; flex-wrap: wrap; gap: 8px; }
-    .log-status-off { color: var(--danger); font-weight: 600; }
     .modbus-status-on  { color: var(--success); font-weight: 600; }
     .modbus-status-off { color: var(--danger); font-weight: 600; }
   </style>
@@ -263,13 +262,6 @@
       <div class="settings-panel">
         <div class="settings-row">
           <div class="settings-row-info">
-            <span class="settings-row-title">WiFi detailed logging</span>
-            <span class="settings-row-sub">Status: <span id="logStatusBadge">Log: OFF</span></span>
-          </div>
-          <button id="toggleWifiLog" class="btn">Start log</button>
-        </div>
-        <div class="settings-row">
-          <div class="settings-row-info">
             <span class="settings-row-title">Modbus polling</span>
             <span class="settings-row-sub">Status: <span id="modbusStatusBadge">Modbus: ON</span></span>
           </div>
@@ -278,7 +270,7 @@
         <div class="settings-row">
           <div class="settings-row-info">
             <span class="settings-row-title">WiFi capture logs</span>
-            <span class="settings-row-sub">Browse, review and download recorded capture files</span>
+            <span class="settings-row-sub">Always recording; browse, review and download captured files</span>
           </div>
           <a href="/wifilogs" class="btn-link">Open</a>
         </div>
@@ -320,15 +312,12 @@
     const statusDetailEl  = document.getElementById('statusDetail');
     const historyEl       = document.getElementById('history');
     const controllersEl   = document.getElementById('controllers');
-    const logStatusBadgeEl    = document.getElementById('logStatusBadge');
-    const toggleWifiLogBtn    = document.getElementById('toggleWifiLog');
     const modbusStatusBadgeEl = document.getElementById('modbusStatusBadge');
     const toggleModbusBtn     = document.getElementById('toggleModbus');
 
     const FLEET_HTTP_PORT = 9999;
     const onlineByIp = {};
     let wsConn = null;
-    let currentLogEnabled = false;
     let currentModbusEnabled = true;
 
     // ── Tabs ──────────────────────────────────────────────────────
@@ -438,13 +427,6 @@
       pills.push(`<span class="pill">${wifi.ssid || 'wifi'} ${level}</span>`);
 
       topbarStatusEl.innerHTML = pills.join('');
-
-      const logCfg = state.detailed_wifi_logging || {};
-      currentLogEnabled = !!logCfg.enabled;
-      logStatusBadgeEl.className  = currentLogEnabled ? 'log-status-on' : 'log-status-off';
-      logStatusBadgeEl.textContent = `${currentLogEnabled ? 'ON' : 'OFF'}`;
-      if (logCfg.last_error) logStatusBadgeEl.textContent += ` (${logCfg.last_error})`;
-      toggleWifiLogBtn.textContent = currentLogEnabled ? 'Stop log' : 'Start log';
 
       const modbusCfg = state.modbus || {};
       currentModbusEnabled = modbusCfg.enabled !== false;
@@ -712,10 +694,6 @@
       if (!fleetDdEl.contains(ev.target)) fleetMenuEl.classList.remove('open');
     });
 
-    toggleWifiLogBtn.onclick = () => {
-      if (!wsConn || wsConn.readyState !== WebSocket.OPEN) return;
-      wsConn.send(JSON.stringify({ type: 'set_detailed_wifi_logging', enabled: !currentLogEnabled }));
-    };
     toggleModbusBtn.onclick = () => {
       if (!wsConn || wsConn.readyState !== WebSocket.OPEN) return;
       wsConn.send(JSON.stringify({ type: 'set_modbus_enabled', enabled: !currentModbusEnabled }));

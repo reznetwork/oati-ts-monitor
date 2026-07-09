@@ -10,6 +10,7 @@ from daemon_services import (
     AppCfg,
     AppState,
     DetailedWifiLogger,
+    FullFidelityLogger,
     VehicleCfg,
     apply_bssid_transition_timing,
     get_wifi_status,
@@ -120,6 +121,59 @@ class TestWifiFeatures(unittest.TestCase):
                 parsed = json.loads(contents[0])
                 self.assertEqual(parsed["type"], "roaming_event")
                 self.assertEqual(parsed["event"], "search")
+            finally:
+                os.chdir(cwd)
+
+    def test_detailed_logger_starts_permanently_enabled(self):
+        with tempfile.TemporaryDirectory() as td:
+            cwd = os.getcwd()
+            try:
+                os.chdir(td)
+                state = AppState(vehicle=VehicleCfg(name="v", controllers=[]), appcfg=AppCfg())
+                logger = DetailedWifiLogger(state, "wifilogs")
+                logger.start()
+                try:
+                    # No manual enable/toggle call: extensive Wi-Fi logging must be
+                    # on as soon as the daemon starts.
+                    self.assertTrue(logger.enabled)
+                    self.assertIsNotNone(logger.current_session_file)
+                finally:
+                    logger.stop()
+            finally:
+                os.chdir(cwd)
+
+    def test_detailed_logger_mirrors_into_full_log(self):
+        with tempfile.TemporaryDirectory() as td:
+            cwd = os.getcwd()
+            try:
+                os.chdir(td)
+                state = AppState(vehicle=VehicleCfg(name="v", controllers=[], short_name="v1"), appcfg=AppCfg())
+                full_base = Path(td) / "full"
+                full_logger = FullFidelityLogger(
+                    state, enabled=True, base_dir=str(full_base), snapshot_interval_sec=999.0, rotate_bytes=5 * 1024 * 1024
+                )
+                full_logger.start()
+                wifi_logger = DetailedWifiLogger(state, "wifilogs", full_logger=full_logger)
+                wifi_logger.start()
+                try:
+                    ts_ms = int(time.time() * 1000)
+                    wifi_logger.enqueue_wifi_sample({"rssi_dbm": -55.0, "bssid": "aa:bb"}, {"lat": 1.0, "lon": 2.0}, ts_ms)
+                    wifi_logger.enqueue_roaming_event("attachment", {"line": "roam"}, {"lat": 1.0, "lon": 2.0}, ts_ms)
+                    time.sleep(0.3)
+                finally:
+                    wifi_logger.stop()
+                    full_logger.stop()
+
+                segs = sorted(full_base.rglob("segment_*.jsonl"))
+                self.assertGreaterEqual(len(segs), 1)
+                kinds = set()
+                for seg in segs:
+                    for line in seg.read_text(encoding="utf-8").splitlines():
+                        rec = json.loads(line)
+                        if rec.get("type") == "event":
+                            kinds.add(rec["data"]["kind"])
+                self.assertIn("wifi_sample", kinds)
+                self.assertIn("wifi_roaming_event", kinds)
             finally:
                 os.chdir(cwd)
 

@@ -299,6 +299,9 @@ def run_daemon(args: argparse.Namespace) -> int:
         rotate_bytes=int(full_rotate or (5 * 1024 * 1024)),
     )
     full_logger.start()
+    # Combine extensive Wi-Fi/roaming logging with the full-fidelity stream so it
+    # rotates, compresses, and uploads alongside the rest of the vehicle state.
+    poller.attach_full_logger(full_logger)
 
     # HTTP upload. On startup it compresses and flushes any inactive backlog automatically.
     upload_enabled = bool(appcfg.upload_enabled) or bool(getattr(args, "upload", False))
