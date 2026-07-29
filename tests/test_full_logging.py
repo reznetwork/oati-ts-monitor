@@ -113,11 +113,11 @@ class TestFullLogging(unittest.TestCase):
                 self.assertEqual(headers.get("X-Log-Segment"), "segment_1710000000000_0.jsonl.gz")
                 self.assertFalse(seg.exists())
                 gz_seg = seg.with_name(seg.name + ".gz")
-                self.assertTrue(gz_seg.exists())
+                self.assertFalse(gz_seg.exists())
 
                 st = json.loads(state_file.read_text(encoding="utf-8"))
                 self.assertIn("uploaded", st)
-                self.assertIn(str(gz_seg), st["uploaded"])
+                self.assertNotIn(str(gz_seg), st["uploaded"])
             finally:
                 httpd.shutdown()
                 httpd.server_close()

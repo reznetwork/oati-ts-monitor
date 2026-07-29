@@ -1045,6 +1045,7 @@ class HttpLogUploader:
 
     - Compresses inactive `segment_*.jsonl` files to `segment_*.jsonl.gz`.
     - Uploads complete gzip files and marks each file complete after HTTP success.
+    - Deletes local segment files after a confirmed upload to free disk space.
     """
 
     def __init__(
@@ -1172,6 +1173,23 @@ class HttpLogUploader:
             uploaded = self._state.setdefault("uploaded", {})
             uploaded[str(path)] = entry
 
+    def _wipe_uploaded(self, path: Path) -> bool:
+        """Delete a successfully uploaded local segment to free disk space."""
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as e:
+            self._logger.warning("Failed to wipe uploaded segment %s: %s", path.name, e)
+            return False
+        with self._lock:
+            uploaded = self._state.setdefault("uploaded", {})
+            uploaded.pop(str(path), None)
+            files = self._state.setdefault("files", {})
+            files.pop(str(path), None)
+            if path.name.endswith(".gz"):
+                files.pop(str(path.with_name(path.name[:-3])), None)
+        self._logger.info("Wiped uploaded segment %s", path.name)
+        return True
+
     def _is_uploaded(self, path: Path) -> bool:
         try:
             st = path.stat()
@@ -1224,6 +1242,8 @@ class HttpLogUploader:
                 return None
             if legacy_fully_uploaded:
                 self._mark_uploaded(gz_path)
+                self._wipe_uploaded(gz_path)
+                return None
             self._logger.info("Compressed %s -> %s (%d bytes)", path.name, gz_path.name, int(gz_path.stat().st_size))
             return gz_path
         except OSError as e:
@@ -1279,6 +1299,10 @@ class HttpLogUploader:
                         break
                     try:
                         if self._is_uploaded(p):
+                            # Retry wipe for files confirmed earlier if unlink failed.
+                            if self._wipe_uploaded(p):
+                                did_work = True
+                                self._save_state()
                             continue
                         if self._segment_size(p) <= 0:
                             self._discard_invalid_segment(p, reason="empty gzip file")
@@ -1286,6 +1310,7 @@ class HttpLogUploader:
                             continue
                         self._post_file(p)
                         self._mark_uploaded(p)
+                        self._wipe_uploaded(p)
                         did_work = True
                         backoff = 0.5
                         self.last_error = None

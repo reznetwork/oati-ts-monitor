@@ -2,31 +2,48 @@
 oati-ts-monitor Log Collector Server
 
 Receives compressed NDJSON log-file uploads from oati-ts-monitor daemons and exposes
-a minimal web dashboard for browsing received data.
+a minimal web dashboard for browsing received data, plus an optional ClickHouse-backed
+historical viewer.
 
 Endpoints:
   POST /ingest                            – receive a compressed log file
-  GET  /                                  – HTML dashboard
+  GET  /                                  – HTML ops dashboard
+  GET  /viewer                            – historical log viewer (dashboard + map + Gantt)
   GET  /api/status                        – JSON overall stats
   GET  /api/devices                       – JSON device list
   GET  /api/segments[?device=<id>]        – JSON segment list
   GET  /api/segments/<device>/<vs>/<seg>  – JSON last 200 lines of a segment
+  GET  /api/vehicles                      – vehicles with time coverage (ClickHouse)
+  GET  /api/activity                      – multi-vehicle activity bars (ClickHouse)
+  GET  /api/slice                         – nearest snapshot at playhead (ClickHouse)
+  GET  /api/track                         – wifi track for map (ClickHouse)
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Any
+from pathlib import Path
+from typing import Any, Optional
 
 from aiohttp import web
 
+from .clickhouse_client import ClickHouseStore, ClickHouseUnavailable
+from .clickhouse_ingest import ingest_payload_to_clickhouse
 from .storage import ChunkStorage
 from http_header_text import decode_http_header_text
 
 logger = logging.getLogger(__name__)
+
+_PACKAGE_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _PACKAGE_DIR.parent
+_VIEWER_TEMPLATE_CANDIDATES = (
+    _REPO_ROOT / "templates" / "log_viewer.html",
+    _PACKAGE_DIR / "templates" / "log_viewer.html",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +86,26 @@ async def handle_ingest(request: web.Request) -> web.Response:
     except ValueError as exc:
         logger.warning("Rejected file from %s/%s: %s", device_id, segment, exc)
         raise web.HTTPConflict(reason=str(exc)) from exc
+
+    ch: Optional[ClickHouseStore] = request.app.get("clickhouse")
+    if ch is not None and payload:
+        try:
+            await asyncio.to_thread(
+                ingest_payload_to_clickhouse,
+                ch,
+                device_id=device_id,
+                vehicle=vehicle,
+                vehicle_short=vehicle_short,
+                segment=segment,
+                payload=payload,
+            )
+        except Exception:
+            logger.exception(
+                "ClickHouse ingest failed for %s/%s/%s (file stored on disk)",
+                device_id,
+                vehicle_short,
+                segment,
+            )
 
     logger.info(
         "✓ %s/%s  file  (%d bytes%s)",
@@ -138,6 +175,95 @@ async def handle_segment_tail(request: web.Request) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
+# ClickHouse query API
+# ---------------------------------------------------------------------------
+
+def _require_clickhouse(request: web.Request) -> ClickHouseStore:
+    ch: Optional[ClickHouseStore] = request.app.get("clickhouse")
+    if ch is None:
+        raise web.HTTPServiceUnavailable(reason="ClickHouse is not enabled on this collector")
+    return ch
+
+
+async def handle_api_vehicles(request: web.Request) -> web.Response:
+    ch = _require_clickhouse(request)
+    try:
+        vehicles = await asyncio.to_thread(ch.list_vehicles)
+    except ClickHouseUnavailable as exc:
+        raise web.HTTPServiceUnavailable(reason=str(exc)) from exc
+    return _json({"vehicles": vehicles})
+
+
+async def handle_api_activity(request: web.Request) -> web.Response:
+    ch = _require_clickhouse(request)
+    q = request.rel_url.query
+    try:
+        from_ms = int(q["from_ms"])
+        to_ms = int(q["to_ms"])
+    except (KeyError, ValueError) as exc:
+        raise web.HTTPBadRequest(reason="from_ms and to_ms are required integers") from exc
+    default_gap = int(request.app.get("activity_gap_ms") or 120_000)
+    try:
+        gap_ms = int(q.get("gap_ms", str(default_gap)))
+    except ValueError:
+        gap_ms = default_gap
+    try:
+        bars = await asyncio.to_thread(
+            ch.activity_intervals, from_ms=from_ms, to_ms=to_ms, gap_ms=gap_ms
+        )
+    except ClickHouseUnavailable as exc:
+        raise web.HTTPServiceUnavailable(reason=str(exc)) from exc
+    return _json({"from_ms": from_ms, "to_ms": to_ms, "gap_ms": gap_ms, "bars": bars})
+
+
+async def handle_api_slice(request: web.Request) -> web.Response:
+    ch = _require_clickhouse(request)
+    q = request.rel_url.query
+    vehicle_short = q.get("vehicle_short") or ""
+    if not vehicle_short:
+        raise web.HTTPBadRequest(reason="vehicle_short is required")
+    try:
+        ts_ms = int(q["ts_ms"])
+    except (KeyError, ValueError) as exc:
+        raise web.HTTPBadRequest(reason="ts_ms is required integer") from exc
+    try:
+        snap = await asyncio.to_thread(ch.nearest_snapshot, vehicle_short=vehicle_short, ts_ms=ts_ms)
+    except ClickHouseUnavailable as exc:
+        raise web.HTTPServiceUnavailable(reason=str(exc)) from exc
+    if snap is None:
+        return _json({"found": False, "vehicle_short": vehicle_short, "ts_ms": ts_ms})
+    return _json({"found": True, **snap})
+
+
+async def handle_api_track(request: web.Request) -> web.Response:
+    ch = _require_clickhouse(request)
+    q = request.rel_url.query
+    vehicle_short = q.get("vehicle_short") or ""
+    if not vehicle_short:
+        raise web.HTTPBadRequest(reason="vehicle_short is required")
+    try:
+        from_ms = int(q["from_ms"])
+        to_ms = int(q["to_ms"])
+    except (KeyError, ValueError) as exc:
+        raise web.HTTPBadRequest(reason="from_ms and to_ms are required integers") from exc
+    try:
+        limit = int(q.get("limit", "50000"))
+    except ValueError:
+        limit = 50_000
+    try:
+        track = await asyncio.to_thread(
+            ch.wifi_track,
+            vehicle_short=vehicle_short,
+            from_ms=from_ms,
+            to_ms=to_ms,
+            limit=limit,
+        )
+    except ClickHouseUnavailable as exc:
+        raise web.HTTPServiceUnavailable(reason=str(exc)) from exc
+    return _json({"vehicle_short": vehicle_short, "from_ms": from_ms, "to_ms": to_ms, **track})
+
+
+# ---------------------------------------------------------------------------
 # Dashboard (HTML)
 # ---------------------------------------------------------------------------
 
@@ -177,6 +303,11 @@ _DASHBOARD_HTML = """\
     background: var(--surface2); border: 1px solid var(--border); color: var(--muted);
   }
   #uptime { margin-left: auto; font-size: 12px; color: var(--muted); font-family: var(--mono); }
+  header a.viewer-link {
+    font-size: 12px; color: var(--accent); text-decoration: none;
+    border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px;
+  }
+  header a.viewer-link:hover { background: var(--surface2); }
 
   main { padding: 24px; max-width: 1300px; margin: 0 auto; }
 
@@ -252,6 +383,7 @@ _DASHBOARD_HTML = """\
   <span id="status-dot"></span>
   <h1>oati-ts-monitor · Log Collector</h1>
   <span class="pill">NDJSON ingest</span>
+  <a class="viewer-link" href="/viewer">Historical viewer</a>
   <div id="uptime">–</div>
 </header>
 
@@ -425,18 +557,34 @@ async def handle_dashboard(request: web.Request) -> web.Response:
     return web.Response(content_type="text/html", text=_DASHBOARD_HTML)
 
 
+async def handle_viewer(request: web.Request) -> web.Response:
+    for path in _VIEWER_TEMPLATE_CANDIDATES:
+        if path.is_file():
+            return web.Response(content_type="text/html", text=path.read_text(encoding="utf-8"))
+    raise web.HTTPNotFound(reason="log_viewer.html template not found")
+
+
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
 
-def make_app(storage: ChunkStorage, *, max_upload_bytes: int = 16 * 1024 * 1024) -> web.Application:
+def make_app(
+    storage: ChunkStorage,
+    *,
+    max_upload_bytes: int = 16 * 1024 * 1024,
+    clickhouse: Optional[ClickHouseStore] = None,
+    activity_gap_ms: int = 120_000,
+) -> web.Application:
     # aiohttp defaults to 1 MiB; daemon segments can produce larger gzip files.
     app = web.Application(client_max_size=max(1024 * 1024, int(max_upload_bytes)))
     app["storage"] = storage
+    app["clickhouse"] = clickhouse
+    app["activity_gap_ms"] = int(activity_gap_ms)
     app["start_mono"] = time.monotonic()
 
     app.router.add_post("/ingest", handle_ingest)
     app.router.add_get("/", handle_dashboard)
+    app.router.add_get("/viewer", handle_viewer)
     app.router.add_get("/api/status", handle_status)
     app.router.add_get("/api/devices", handle_devices)
     app.router.add_get("/api/segments", handle_segments)
@@ -444,6 +592,10 @@ def make_app(storage: ChunkStorage, *, max_upload_bytes: int = 16 * 1024 * 1024)
         "/api/segments/{device}/{vehicle_short}/{segment}",
         handle_segment_tail,
     )
+    app.router.add_get("/api/vehicles", handle_api_vehicles)
+    app.router.add_get("/api/activity", handle_api_activity)
+    app.router.add_get("/api/slice", handle_api_slice)
+    app.router.add_get("/api/track", handle_api_track)
 
     return app
 

@@ -1,0 +1,113 @@
+oati-ts-monitor · Historical Log Viewer — textmode mockups
+============================================================
+Platform: web (browser). These ASCII layouts are design mockups only.
+Legend:  ║ / ═  = resizable splitter gutters
+         *      = playhead on date axis
+         [===]  = activity bar (uploaded log coverage)
+
+
+1) Default layout (desktop)
+---------------------------
+
++-- Historical Log Viewer · Selected: segway_villain · Playhead: 2026-07-29 10:42:17.320 --+
+| HEADER: selected vehicle name · playhead timestamp · link to ops dashboard               |
++------------------------------------------------------------------------------------------+
+|  DASHBOARD REPLAY (slice @ playhead)          ║  WIFI MAP (track in visible range)       |
+|                                               ║                                          |
+|  [Overview] [Inputs]                          ║   .  .  path (RSSI-colored)              |
+|                                               ║     o--o--o--*--o--o                     |
+|  GNSS                 WiFi                    ║              ^ playhead marker           |
+|  fix: FIX 3D          ssid: exam-ap           ║                                          |
+|  sats: 12  hdop: 0.8  rssi: -62 dBm           ║   roaming: ◉  (event markers)            |
+|  lat/lon: …           bssid: aa:bb:…          ║                                          |
+|                                               ║                                          |
+|  Controllers / latency pills…                 ║   layers: RSSI | BSSID | GNSS            |
+|                                               ║                                          |
+|  (Inputs tab: DI points ON/OFF, gears)        ║                                          |
+|                                               ║                                          |
++===============================================╬==========================================+
+| TIMELINE TOOLBAR  [< pan] [pan >]  [zoom -] [zoom +]  [fit all]                          |
+| visible window: 2026-07-29 09:30:00  …  2026-07-29 14:00:00                              |
+|------------------------------------------------------------------------------------------|
+| Date axis     09:30      10:00      10:30      11:00      11:30      12:00      13:00   |
+|                 |          |          |     *    |          |          |          |      |
+| vehicle labels ║ activity bars (scroll horizontally with date axis; zoom changes scale)  |
+|---------------─╬─────────────────────────────────────────────────────────────────────────|
+| segway_villain ║  [========][===]              [================]          ◄ selected   |
+| jhlift_9595    ║         [===============]                                               |
+| jhlift_9596    ║  [==]                       [====][========]                            |
+| cfmoto_600     ║               [====================]                                    |
+| lovol          ║                                      [==========]                       |
+| belarus_82_1   ║  [=============================]                                        |
+| …              ║                                                                         |
++------------------------------------------------------------------------------------------+
+
+
+2) After resizing (map wider, timeline taller)
+----------------------------------------------
+
++-- Selected: jhlift_9595 · Playhead: 2026-07-29 11:05:02 ---------------------------------+
+| DASHBOARD (narrower) ║  WIFI MAP (wider)                                                 |
+| GNSS / WiFi cards    ║                                                                   |
+| DI summary…          ║            full map canvas                                        |
+|                      ║                                                                   |
++======================╬===================================================================+
+|                                                                                          |
+|  (taller timeline region — more vehicle rows visible without scrolling)                  |
+|                                                                                          |
+| Date axis …                                                                              |
+| jhlift_9595  [===============]*========     ◄ selected row highlighted                   |
+| …                                                                                        |
++------------------------------------------------------------------------------------------+
+
+
+3) Interaction notes
+--------------------
+
+Selection
+  • Click vehicle row label OR any activity bar → select that vehicle.
+  • Main window (dashboard + map) reloads for the selected vehicle.
+  • Selected row is visually highlighted.
+
+Playhead
+  • Vertical line across all rows on the shared date axis.
+  • Click or drag on the timeline canvas to move playhead.
+  • Dashboard shows nearest snapshot at/before playhead (slice).
+  • Map playhead marker snaps to nearest wifi sample with lat/lon.
+
+Zoom / pan
+  • Mouse wheel over timeline → zoom in/out around cursor (or playhead).
+  • Drag empty timeline background → pan visible date window.
+  • Toolbar buttons: pan, zoom, fit-all (global min/max coverage).
+
+Activity bars
+  • Derived from uploaded segment time coverage (min/max ts per segment).
+  • Contiguous / overlapping segments merged; idle gap > threshold → separate bars.
+  • Gaps (no bar) mean no ingested log data for that vehicle in that interval.
+
+Resizable regions
+  • Drag vertical gutter (║) between dashboard and map.
+  • Drag horizontal gutter (═) between main window and timeline.
+  • Optional: drag label-column edge on timeline.
+  • Splitter positions persist in browser localStorage.
+
+
+4) Empty / loading states
+-------------------------
+
+No ClickHouse / no data:
++-- Historical Log Viewer ---------------------------------------------------------------+
+|  No ingested logs yet. Upload segments to /ingest or run backfill.                     |
+|  Timeline empty · Dashboard: — · Map: —                                                |
++----------------------------------------------------------------------------------------+
+
+Vehicle selected but playhead outside coverage:
+|  Dashboard: "No snapshot at/before playhead"                                           |
+|  Map: empty path or last known track in visible window                                 |
+
+
+5) Ops dashboard link
+---------------------
+
+Collector ops page (/) gains a link: [Open historical viewer → /viewer]
+Viewer header gains a link: [Ops dashboard → /]

@@ -1,0 +1,805 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>oati-ts-monitor · Historical Log Viewer</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  :root {
+    --bg: #0b1419;
+    --surface: #0f1b21;
+    --surface2: #122029;
+    --border: #1f2e35;
+    --border-strong: #2a3d46;
+    --text: #e7ecee;
+    --muted: #5c7178;
+    --secondary: #9fb6bd;
+    --accent: #3fb6d8;
+    --success: #7fcf8e;
+    --danger: #e2615a;
+    --warning: #e0b34d;
+    --bar: #3fb6d8;
+    --bar-selected: #6ee7b7;
+    --playhead: #f59e0b;
+    --splitter: #2a3d46;
+    --header-h: 48px;
+    --dash-pct: 50%;
+    --main-pct: 62%;
+    --label-w: 140px;
+  }
+  * , *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 13px; }
+
+  header.app-header {
+    height: var(--header-h); display: flex; align-items: center; gap: 12px;
+    padding: 0 14px; background: var(--surface); border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 14px; font-weight: 600; color: var(--accent); white-space: nowrap; }
+  header .meta { color: var(--secondary); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  header .meta strong { color: var(--text); font-weight: 600; }
+  header a { color: var(--accent); text-decoration: none; font-size: 12px; margin-left: auto;
+    border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; }
+  header a:hover { background: var(--surface2); }
+
+  .layout {
+    height: calc(100% - var(--header-h));
+    display: grid;
+    grid-template-rows: minmax(120px, var(--main-pct)) 6px minmax(140px, 1fr);
+  }
+  .main-row {
+    display: grid;
+    grid-template-columns: minmax(180px, var(--dash-pct)) 6px minmax(180px, 1fr);
+    min-height: 0; overflow: hidden;
+  }
+  .pane { min-height: 0; min-width: 0; overflow: hidden; background: var(--bg); display: flex; flex-direction: column; }
+  .pane-title {
+    flex: 0 0 auto; padding: 8px 12px; font-size: 11px; text-transform: uppercase;
+    letter-spacing: .06em; color: var(--muted); border-bottom: 1px solid var(--border);
+    background: var(--surface); display: flex; align-items: center; gap: 8px;
+  }
+  .pane-body { flex: 1; min-height: 0; overflow: auto; padding: 12px; }
+  #map-pane .pane-body { padding: 0; }
+  #map { width: 100%; height: 100%; background: #0a1216; }
+
+  .splitter-h, .splitter-v {
+    background: var(--splitter); position: relative; z-index: 5;
+  }
+  .splitter-h { cursor: col-resize; }
+  .splitter-v { cursor: row-resize; }
+  .splitter-h:hover, .splitter-v:hover, .splitter-h.active, .splitter-v.active {
+    background: var(--accent);
+  }
+
+  .tabs { display: flex; gap: 4px; margin-left: auto; }
+  .tab-btn {
+    background: none; border: none; color: var(--secondary); font-size: 11px;
+    padding: 2px 8px; border-radius: 4px; cursor: pointer; text-transform: none; letter-spacing: 0;
+  }
+  .tab-btn.active { background: var(--surface2); color: var(--text); }
+
+  .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px;
+  }
+  .card h3 { font-size: 12px; margin-bottom: 8px; }
+  .detail-row { display: flex; justify-content: space-between; gap: 8px; padding: 4px 0;
+    border-bottom: 1px solid rgba(255,255,255,.04); font-size: 12px; }
+  .detail-row:last-child { border-bottom: none; }
+  .detail-label { color: var(--secondary); }
+  .detail-value { font-weight: 500; text-align: right; }
+  .pills { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+  .pill {
+    background: var(--surface2); border: 1px solid var(--border); border-radius: 999px;
+    padding: 4px 8px; font-size: 11px; color: var(--secondary);
+  }
+  .points { list-style: none; display: flex; flex-direction: column; gap: 4px; }
+  .point-row {
+    display: flex; justify-content: space-between; align-items: center;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px;
+  }
+  .point-on { color: var(--success); }
+  .point-off { color: var(--muted); }
+  .ctrl-block { margin-bottom: 14px; }
+  .ctrl-block h4 { font-size: 12px; color: var(--accent); margin-bottom: 6px; }
+  .gears { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .gear {
+    min-width: 36px; text-align: center; padding: 6px 8px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--muted);
+  }
+  .gear.active { border-color: var(--accent); color: var(--text); background: var(--surface2); }
+  .empty-msg { color: var(--muted); font-style: italic; padding: 20px; text-align: center; }
+
+  /* Timeline */
+  #timeline-pane { display: flex; flex-direction: column; background: var(--surface); border-top: 1px solid var(--border); }
+  .tl-toolbar {
+    flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+    padding: 8px 12px; border-bottom: 1px solid var(--border);
+  }
+  .tl-toolbar button {
+    background: var(--surface2); border: 1px solid var(--border-strong); color: var(--text);
+    border-radius: 5px; padding: 4px 10px; cursor: pointer; font-size: 12px;
+  }
+  .tl-toolbar button:hover { border-color: var(--accent); }
+  .tl-toolbar .range { font-family: ui-monospace, monospace; font-size: 11px; color: var(--secondary); }
+  .tl-body { flex: 1; min-height: 0; display: grid; grid-template-columns: var(--label-w) 4px 1fr; }
+  .tl-label-split { cursor: col-resize; background: var(--splitter); }
+  .tl-label-split:hover { background: var(--accent); }
+  .tl-labels { overflow: auto; border-right: 1px solid var(--border); background: var(--surface2); }
+  .tl-label-row {
+    height: 28px; display: flex; align-items: center; padding: 0 10px;
+    border-bottom: 1px solid var(--border); font-size: 12px; cursor: pointer;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .tl-label-row:hover { background: var(--surface); }
+  .tl-label-row.selected { color: var(--bar-selected); font-weight: 600; background: rgba(110,231,183,.08); }
+  .tl-canvas-wrap { position: relative; overflow: hidden; background: var(--bg); }
+  .tl-axis {
+    position: absolute; top: 0; left: 0; right: 0; height: 24px;
+    border-bottom: 1px solid var(--border); background: var(--surface);
+    pointer-events: none; z-index: 2;
+  }
+  .tl-axis-tick {
+    position: absolute; top: 0; height: 100%; border-left: 1px solid var(--border);
+    font-size: 10px; color: var(--muted); padding: 4px 0 0 4px; white-space: nowrap;
+  }
+  .tl-rows { position: absolute; top: 24px; left: 0; right: 0; bottom: 0; overflow: auto; }
+  .tl-row {
+    position: relative; height: 28px; border-bottom: 1px solid rgba(255,255,255,.04); cursor: pointer;
+  }
+  .tl-row.selected { background: rgba(110,231,183,.06); }
+  .tl-bar {
+    position: absolute; top: 6px; height: 16px; border-radius: 3px;
+    background: var(--bar); opacity: .85; min-width: 2px;
+  }
+  .tl-row.selected .tl-bar { background: var(--bar-selected); }
+  .tl-playhead {
+    position: absolute; top: 0; bottom: 0; width: 2px; background: var(--playhead);
+    z-index: 4; pointer-events: none; box-shadow: 0 0 6px rgba(245,158,11,.5);
+  }
+  .tl-playhead::before {
+    content: ""; position: absolute; top: 0; left: -5px;
+    border-left: 6px solid transparent; border-right: 6px solid transparent;
+    border-top: 8px solid var(--playhead);
+  }
+</style>
+</head>
+<body>
+<header class="app-header">
+  <h1>Historical Log Viewer</h1>
+  <div class="meta" id="header-meta">Loading…</div>
+  <a href="/">Ops dashboard</a>
+</header>
+
+<div class="layout" id="layout">
+  <div class="main-row" id="main-row">
+    <section class="pane" id="dash-pane">
+      <div class="pane-title">
+        Dashboard replay
+        <div class="tabs">
+          <button class="tab-btn active" data-tab="overview">Overview</button>
+          <button class="tab-btn" data-tab="inputs">Inputs</button>
+        </div>
+      </div>
+      <div class="pane-body" id="dash-body">
+        <div class="empty-msg">Select a vehicle on the timeline</div>
+      </div>
+    </section>
+    <div class="splitter-h" id="split-h" title="Drag to resize"></div>
+    <section class="pane" id="map-pane">
+      <div class="pane-title">WiFi map</div>
+      <div class="pane-body"><div id="map"></div></div>
+    </section>
+  </div>
+  <div class="splitter-v" id="split-v" title="Drag to resize"></div>
+  <section id="timeline-pane">
+    <div class="tl-toolbar">
+      <button type="button" id="btn-pan-left">← Pan</button>
+      <button type="button" id="btn-pan-right">Pan →</button>
+      <button type="button" id="btn-zoom-out">Zoom −</button>
+      <button type="button" id="btn-zoom-in">Zoom +</button>
+      <button type="button" id="btn-fit">Fit all</button>
+      <span class="range" id="tl-range">—</span>
+    </div>
+    <div class="tl-body">
+      <div class="tl-labels" id="tl-labels"></div>
+      <div class="tl-label-split" id="split-label" title="Drag to resize labels"></div>
+      <div class="tl-canvas-wrap" id="tl-canvas-wrap">
+        <div class="tl-axis" id="tl-axis"></div>
+        <div class="tl-rows" id="tl-rows"></div>
+        <div class="tl-playhead" id="tl-playhead"></div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+(function () {
+  const LS = {
+    dash: 'oati.viewer.dashPct',
+    main: 'oati.viewer.mainPct',
+    label: 'oati.viewer.labelW',
+  };
+
+  const state = {
+    vehicles: [],
+    selected: null,
+    playheadMs: null,
+    viewFrom: null,
+    viewTo: null,
+    globalFrom: null,
+    globalTo: null,
+    bars: [],
+    vehicleOrder: [],
+    slice: null,
+    track: null,
+    dashTab: 'overview',
+    map: null,
+    pathLayer: null,
+    roamLayer: null,
+    marker: null,
+  };
+
+  function $(id) { return document.getElementById(id); }
+
+  function fmtTs(ms) {
+    if (ms == null || !Number.isFinite(ms)) return '—';
+    const d = new Date(ms);
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} `
+      + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3,'0')}`;
+  }
+
+  function fmtAxis(ms, span) {
+    const d = new Date(ms);
+    const p = (n) => String(n).padStart(2, '0');
+    if (span > 3 * 86400000) return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`;
+    if (span > 6 * 3600000) return `${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:00`;
+    return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  }
+
+  async function fetchJSON(url) {
+    const r = await fetch(url);
+    if (!r.ok) {
+      const t = await r.text();
+      throw new Error(t || r.statusText);
+    }
+    return r.json();
+  }
+
+  function loadLayout() {
+    const dash = parseFloat(localStorage.getItem(LS.dash));
+    const main = parseFloat(localStorage.getItem(LS.main));
+    const label = parseFloat(localStorage.getItem(LS.label));
+    if (Number.isFinite(dash)) document.documentElement.style.setProperty('--dash-pct', dash + '%');
+    if (Number.isFinite(main)) document.documentElement.style.setProperty('--main-pct', main + '%');
+    if (Number.isFinite(label)) document.documentElement.style.setProperty('--label-w', label + 'px');
+  }
+
+  function saveLayout() {
+    const dash = getComputedStyle(document.documentElement).getPropertyValue('--dash-pct').trim().replace('%','');
+    const main = getComputedStyle(document.documentElement).getPropertyValue('--main-pct').trim().replace('%','');
+    const lw = getComputedStyle(document.documentElement).getPropertyValue('--label-w').trim().replace('px','');
+    localStorage.setItem(LS.dash, dash);
+    localStorage.setItem(LS.main, main);
+    localStorage.setItem(LS.label, lw);
+  }
+
+  function setupSplitters() {
+    function drag(el, onMove) {
+      el.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        el.classList.add('active');
+        const move = (ev) => onMove(ev);
+        const up = () => {
+          el.classList.remove('active');
+          document.removeEventListener('mousemove', move);
+          document.removeEventListener('mouseup', up);
+          saveLayout();
+          invalidateMap();
+          renderTimeline();
+        };
+        document.addEventListener('mousemove', move);
+        document.addEventListener('mouseup', up);
+      });
+    }
+
+    drag($('split-h'), (ev) => {
+      const row = $('main-row').getBoundingClientRect();
+      const pct = ((ev.clientX - row.left) / row.width) * 100;
+      document.documentElement.style.setProperty('--dash-pct', Math.min(80, Math.max(20, pct)) + '%');
+    });
+
+    drag($('split-v'), (ev) => {
+      const layout = $('layout').getBoundingClientRect();
+      const pct = ((ev.clientY - layout.top) / layout.height) * 100;
+      document.documentElement.style.setProperty('--main-pct', Math.min(85, Math.max(25, pct)) + '%');
+    });
+
+    drag($('split-label'), (ev) => {
+      const body = document.querySelector('.tl-body').getBoundingClientRect();
+      const w = Math.min(280, Math.max(80, ev.clientX - body.left));
+      document.documentElement.style.setProperty('--label-w', w + 'px');
+    });
+  }
+
+  function updateHeader() {
+    const sel = state.selected || '—';
+    $('header-meta').innerHTML =
+      `Selected: <strong>${sel}</strong> · Playhead: <strong>${fmtTs(state.playheadMs)}</strong>`;
+  }
+
+  function rssiColor(dbm) {
+    if (dbm == null) return '#64748b';
+    const t = Math.max(0, Math.min(1, (dbm + 90) / 50));
+    const r = Math.round(255 * (1 - t));
+    const g = Math.round(180 * t + 40);
+    return `rgb(${r},${g},80)`;
+  }
+
+  function initMap() {
+    state.map = L.map('map', { zoomControl: true }).setView([55.75, 37.62], 12);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap',
+    }).addTo(state.map);
+    state.pathLayer = L.layerGroup().addTo(state.map);
+    state.roamLayer = L.layerGroup().addTo(state.map);
+  }
+
+  function invalidateMap() {
+    if (state.map) setTimeout(() => state.map.invalidateSize(), 50);
+  }
+
+  function renderTrack() {
+    state.pathLayer.clearLayers();
+    state.roamLayer.clearLayers();
+    if (state.marker) { state.map.removeLayer(state.marker); state.marker = null; }
+    const samples = (state.track && state.track.samples) || [];
+    const roaming = (state.track && state.track.roaming) || [];
+    if (!samples.length) {
+      invalidateMap();
+      return;
+    }
+    for (let i = 1; i < samples.length; i++) {
+      const a = samples[i - 1], b = samples[i];
+      L.polyline([[a.lat, a.lon], [b.lat, b.lon]], {
+        color: rssiColor(a.rssi_dbm), weight: 4, opacity: 0.9,
+      }).addTo(state.pathLayer);
+    }
+    for (const r of roaming) {
+      L.circleMarker([r.lat, r.lon], {
+        radius: 6, color: '#f59e0b', fillColor: '#f59e0b', fillOpacity: 0.9, weight: 1,
+      }).bindTooltip(`${r.event || 'roam'} @ ${fmtTs(r.ts_ms)}`).addTo(state.roamLayer);
+    }
+    updatePlayheadMarker();
+    const bounds = L.latLngBounds(samples.map(s => [s.lat, s.lon]));
+    if (bounds.isValid()) state.map.fitBounds(bounds.pad(0.15));
+    invalidateMap();
+  }
+
+  function updatePlayheadMarker() {
+    if (!state.map || !state.track || !state.track.samples.length || state.playheadMs == null) return;
+    let best = state.track.samples[0];
+    let bestDist = Math.abs(best.ts_ms - state.playheadMs);
+    for (const s of state.track.samples) {
+      const d = Math.abs(s.ts_ms - state.playheadMs);
+      if (d < bestDist) { best = s; bestDist = d; }
+    }
+    if (state.marker) state.map.removeLayer(state.marker);
+    state.marker = L.circleMarker([best.lat, best.lon], {
+      radius: 8, color: '#fff', fillColor: '#f59e0b', fillOpacity: 1, weight: 2,
+    }).bindTooltip(`playhead ${fmtTs(state.playheadMs)}`).addTo(state.map);
+  }
+
+  function esc(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c => ({
+      '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+    }[c]));
+  }
+
+  function renderDashboard() {
+    const body = $('dash-body');
+    if (!state.slice || !state.slice.found) {
+      body.innerHTML = `<div class="empty-msg">${state.selected
+        ? 'No snapshot at/before playhead for this vehicle'
+        : 'Select a vehicle on the timeline'}</div>`;
+      return;
+    }
+    const data = state.slice.data || {};
+    const gnss = data.gnss || {};
+    const wifi = data.wifi || {};
+    const controllers = data.controllers || {};
+
+    const pills = [];
+    if (data.display_latency && data.display_latency.gateway_ms != null) {
+      pills.push(`Gateway ${Number(data.display_latency.gateway_ms).toFixed(0)} ms`);
+    }
+    for (const [name, c] of Object.entries(controllers)) {
+      const st = c.status || '—';
+      const lat = c.latency != null ? `${Number(c.latency).toFixed(0)} ms` : '—';
+      pills.push(`${name}: ${st} / ${lat}`);
+    }
+    pills.push(`GNSS ${gnss.fix || '—'}`);
+    pills.push(`WiFi ${wifi.ssid || '—'} ${wifi.signal_dbm != null ? wifi.signal_dbm + ' dBm' : (wifi.signal || '')}`);
+
+    const overview = `
+      <div class="pills">${pills.map(p => `<span class="pill">${esc(p)}</span>`).join('')}</div>
+      <div class="grid-2">
+        <div class="card"><h3>GNSS</h3>
+          ${[
+            ['Fix', gnss.fix], ['Solution', gnss.solution_level],
+            ['Sats', gnss.sats ?? gnss.num_sats], ['HDOP', gnss.hdop],
+            ['Lat', gnss.lat], ['Lon', gnss.lon],
+          ].map(([l,v]) => `<div class="detail-row"><span class="detail-label">${esc(l)}</span>
+            <span class="detail-value">${esc(v ?? '—')}</span></div>`).join('')}
+        </div>
+        <div class="card"><h3>WiFi</h3>
+          ${[
+            ['Status', wifi.status], ['SSID', wifi.ssid], ['BSSID', wifi.bssid],
+            ['Signal', wifi.signal_dbm != null ? wifi.signal_dbm + ' dBm' : wifi.signal],
+            ['Freq', wifi.freq || wifi.frequency],
+            ['BSSID change', wifi.bssid_change_ms != null ? wifi.bssid_change_ms + ' ms ago' : null],
+          ].map(([l,v]) => `<div class="detail-row"><span class="detail-label">${esc(l)}</span>
+            <span class="detail-value">${esc(v ?? '—')}</span></div>`).join('')}
+        </div>
+      </div>
+      <div class="card" style="margin-top:10px"><h3>Slice</h3>
+        <div class="detail-row"><span class="detail-label">Snapshot ts</span>
+          <span class="detail-value">${esc(fmtTs(state.slice.ts_ms))}</span></div>
+        <div class="detail-row"><span class="detail-label">Segment</span>
+          <span class="detail-value">${esc(state.slice.segment)}</span></div>
+      </div>`;
+
+    let inputs = '';
+    for (const [name, c] of Object.entries(controllers)) {
+      const points = c.points || {};
+      const meta = c.points_meta || {};
+      const gears = c.gears || {};
+      const extra = c.extra || {};
+      const rows = Object.keys(points).sort((a,b)=>Number(a)-Number(b)).map(addr => {
+        const on = !!points[addr];
+        const label = (meta[addr] && (meta[addr].label || meta[addr].name)) || `DI ${addr}`;
+        return `<li class="point-row"><span>${esc(label)}</span>
+          <span class="${on?'point-on':'point-off'}">${on?'ON':'OFF'}</span></li>`;
+      }).join('');
+      const gearHtml = Object.entries(gears).map(([g, on]) =>
+        `<div class="gear ${on?'active':''}">${esc(g)}</div>`).join('');
+      const extraRows = Object.entries(extra).map(([k,v]) =>
+        `<li class="point-row"><span>${esc(k)}</span><span>${esc(v)}</span></li>`).join('');
+      inputs += `<div class="ctrl-block"><h4>${esc(name)}</h4>
+        <ul class="points">${rows || '<li class="empty-msg">No points</li>'}</ul>
+        ${gearHtml ? `<div class="gears">${gearHtml}</div>` : ''}
+        ${extraRows ? `<ul class="points" style="margin-top:6px">${extraRows}</ul>` : ''}
+      </div>`;
+    }
+    if (!inputs) inputs = '<div class="empty-msg">No controller data in this snapshot</div>';
+
+    body.innerHTML = state.dashTab === 'inputs' ? inputs : overview;
+  }
+
+  function msToX(ms, width) {
+    const span = state.viewTo - state.viewFrom;
+    if (span <= 0) return 0;
+    return ((ms - state.viewFrom) / span) * width;
+  }
+
+  function xToMs(x, width) {
+    const span = state.viewTo - state.viewFrom;
+    return state.viewFrom + (x / width) * span;
+  }
+
+  function renderTimeline() {
+    const wrap = $('tl-canvas-wrap');
+    const width = wrap.clientWidth || 1;
+    const labels = $('tl-labels');
+    const rowsEl = $('tl-rows');
+    const axis = $('tl-axis');
+
+    labels.innerHTML = '';
+    rowsEl.innerHTML = '';
+    axis.innerHTML = '';
+
+    const order = state.vehicleOrder.length
+      ? state.vehicleOrder
+      : [...new Set(state.bars.map(b => b.vehicle_short))].sort();
+
+    for (const vs of order) {
+      const lab = document.createElement('div');
+      lab.className = 'tl-label-row' + (vs === state.selected ? ' selected' : '');
+      lab.textContent = vs;
+      lab.title = vs;
+      lab.addEventListener('click', () => selectVehicle(vs));
+      labels.appendChild(lab);
+
+      const row = document.createElement('div');
+      row.className = 'tl-row' + (vs === state.selected ? ' selected' : '');
+      row.dataset.vehicle = vs;
+      for (const bar of state.bars.filter(b => b.vehicle_short === vs)) {
+        const left = msToX(bar.from_ms, width);
+        const right = msToX(bar.to_ms, width);
+        const el = document.createElement('div');
+        el.className = 'tl-bar';
+        el.style.left = Math.max(0, left) + 'px';
+        el.style.width = Math.max(2, right - left) + 'px';
+        el.title = `${vs}\n${fmtTs(bar.raw_from_ms || bar.from_ms)} → ${fmtTs(bar.raw_to_ms || bar.to_ms)}`;
+        el.addEventListener('click', (e) => {
+          e.stopPropagation();
+          selectVehicle(vs);
+          const mid = (bar.from_ms + bar.to_ms) / 2;
+          setPlayhead(mid, true);
+        });
+        row.appendChild(el);
+      }
+      row.addEventListener('click', (e) => {
+        selectVehicle(vs);
+        const rect = wrap.getBoundingClientRect();
+        setPlayhead(xToMs(e.clientX - rect.left, width), true);
+      });
+      rowsEl.appendChild(row);
+    }
+
+    const span = state.viewTo - state.viewFrom;
+    const tickCount = Math.max(4, Math.min(12, Math.floor(width / 110)));
+    for (let i = 0; i <= tickCount; i++) {
+      const ms = state.viewFrom + (span * i) / tickCount;
+      const tick = document.createElement('div');
+      tick.className = 'tl-axis-tick';
+      tick.style.left = msToX(ms, width) + 'px';
+      tick.textContent = fmtAxis(ms, span);
+      axis.appendChild(tick);
+    }
+
+    $('tl-range').textContent =
+      `${fmtTs(state.viewFrom)}  …  ${fmtTs(state.viewTo)}`;
+
+    positionPlayhead();
+  }
+
+  function positionPlayhead() {
+    const wrap = $('tl-canvas-wrap');
+    const width = wrap.clientWidth || 1;
+    const ph = $('tl-playhead');
+    if (state.playheadMs == null || state.viewFrom == null) {
+      ph.style.display = 'none';
+      return;
+    }
+    ph.style.display = 'block';
+    ph.style.left = msToX(state.playheadMs, width) + 'px';
+  }
+
+  async function selectVehicle(vs) {
+    if (state.selected !== vs) {
+      state.selected = vs;
+      updateHeader();
+      renderTimeline();
+      await Promise.all([loadSlice(), loadTrack()]);
+    } else {
+      updateHeader();
+      renderTimeline();
+    }
+  }
+
+  async function setPlayhead(ms, fetchData) {
+    state.playheadMs = Math.round(ms);
+    updateHeader();
+    positionPlayhead();
+    updatePlayheadMarker();
+    if (fetchData && state.selected) {
+      await Promise.all([loadSlice(), loadTrack()]);
+    } else if (fetchData) {
+      await loadSlice();
+    }
+  }
+
+  async function loadVehicles() {
+    const data = await fetchJSON('/api/vehicles');
+    state.vehicles = data.vehicles || [];
+    state.vehicleOrder = state.vehicles.map(v => v.vehicle_short);
+    if (!state.vehicles.length) {
+      $('header-meta').textContent = 'No ingested logs in ClickHouse yet';
+      state.viewFrom = Date.now() - 3600000;
+      state.viewTo = Date.now();
+      state.globalFrom = state.viewFrom;
+      state.globalTo = state.viewTo;
+      state.playheadMs = state.viewFrom;
+      renderTimeline();
+      return;
+    }
+    state.globalFrom = Math.min(...state.vehicles.map(v => v.min_ts_ms));
+    state.globalTo = Math.max(...state.vehicles.map(v => v.max_ts_ms));
+    if (state.globalTo <= state.globalFrom) state.globalTo = state.globalFrom + 1;
+    state.viewFrom = state.globalFrom;
+    state.viewTo = state.globalTo;
+    state.playheadMs = state.globalFrom;
+    if (!state.selected) state.selected = state.vehicles[0].vehicle_short;
+    updateHeader();
+    await refreshActivity();
+    await Promise.all([loadSlice(), loadTrack()]);
+  }
+
+  async function refreshActivity() {
+    if (state.viewFrom == null) return;
+    const pad = Math.max(1, state.viewTo - state.viewFrom) * 0.02;
+    const data = await fetchJSON(
+      `/api/activity?from_ms=${Math.floor(state.viewFrom - pad)}&to_ms=${Math.ceil(state.viewTo + pad)}`
+    );
+    state.bars = data.bars || [];
+    const fromBars = new Set(state.bars.map(b => b.vehicle_short));
+    for (const v of state.vehicles) fromBars.add(v.vehicle_short);
+    if (!state.vehicleOrder.length) state.vehicleOrder = [...fromBars].sort();
+    renderTimeline();
+  }
+
+  async function loadSlice() {
+    if (!state.selected || state.playheadMs == null) {
+      state.slice = null;
+      renderDashboard();
+      return;
+    }
+    try {
+      state.slice = await fetchJSON(
+        `/api/slice?vehicle_short=${encodeURIComponent(state.selected)}&ts_ms=${state.playheadMs}`
+      );
+    } catch (e) {
+      state.slice = null;
+      $('dash-body').innerHTML = `<div class="empty-msg">${esc(e.message)}</div>`;
+      return;
+    }
+    renderDashboard();
+  }
+
+  async function loadTrack() {
+    if (!state.selected || state.viewFrom == null) {
+      state.track = { samples: [], roaming: [] };
+      renderTrack();
+      return;
+    }
+    try {
+      state.track = await fetchJSON(
+        `/api/track?vehicle_short=${encodeURIComponent(state.selected)}`
+        + `&from_ms=${Math.floor(state.viewFrom)}&to_ms=${Math.ceil(state.viewTo)}`
+      );
+    } catch (e) {
+      state.track = { samples: [], roaming: [] };
+    }
+    renderTrack();
+  }
+
+  function zoom(factor, centerMs) {
+    const span = state.viewTo - state.viewFrom;
+    const mid = centerMs != null ? centerMs : (state.viewFrom + state.viewTo) / 2;
+    let newSpan = span / factor;
+    const minSpan = 1000;
+    const maxSpan = Math.max(minSpan, (state.globalTo - state.globalFrom) * 1.2);
+    newSpan = Math.min(maxSpan, Math.max(minSpan, newSpan));
+    state.viewFrom = mid - newSpan / 2;
+    state.viewTo = mid + newSpan / 2;
+    refreshActivity().then(() => loadTrack());
+  }
+
+  function pan(dir) {
+    const span = state.viewTo - state.viewFrom;
+    const delta = span * 0.25 * dir;
+    state.viewFrom += delta;
+    state.viewTo += delta;
+    refreshActivity().then(() => loadTrack());
+  }
+
+  function fitAll() {
+    if (state.globalFrom == null) return;
+    state.viewFrom = state.globalFrom;
+    state.viewTo = state.globalTo;
+    refreshActivity().then(() => loadTrack());
+  }
+
+  function setupTimelineInteractions() {
+    const wrap = $('tl-canvas-wrap');
+    let dragging = false;
+    let panning = false;
+    let lastX = 0;
+
+    wrap.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      if (e.shiftKey || e.altKey) {
+        panning = true;
+        lastX = e.clientX;
+      } else {
+        dragging = true;
+        const rect = wrap.getBoundingClientRect();
+        setPlayhead(xToMs(e.clientX - rect.left, rect.width), false);
+      }
+    });
+    document.addEventListener('mousemove', (e) => {
+      if (dragging) {
+        const rect = wrap.getBoundingClientRect();
+        setPlayhead(xToMs(e.clientX - rect.left, rect.width), false);
+      } else if (panning) {
+        const rect = wrap.getBoundingClientRect();
+        const dx = e.clientX - lastX;
+        lastX = e.clientX;
+        const span = state.viewTo - state.viewFrom;
+        const dms = -(dx / rect.width) * span;
+        state.viewFrom += dms;
+        state.viewTo += dms;
+        renderTimeline();
+      }
+    });
+    document.addEventListener('mouseup', () => {
+      if (dragging) {
+        dragging = false;
+        if (state.selected) Promise.all([loadSlice(), loadTrack()]);
+        else loadSlice();
+      }
+      if (panning) {
+        panning = false;
+        refreshActivity().then(() => loadTrack());
+      }
+    });
+
+    wrap.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const rect = wrap.getBoundingClientRect();
+      const center = xToMs(e.clientX - rect.left, rect.width);
+      zoom(e.deltaY < 0 ? 1.25 : 0.8, center);
+    }, { passive: false });
+
+    // Drag empty background to pan (middle mouse or drag on axis area)
+    wrap.addEventListener('mousedown', (e) => {
+      if (e.button === 1) {
+        e.preventDefault();
+        panning = true;
+        lastX = e.clientX;
+      }
+    });
+
+    $('btn-zoom-in').onclick = () => zoom(1.4, state.playheadMs);
+    $('btn-zoom-out').onclick = () => zoom(0.7, state.playheadMs);
+    $('btn-pan-left').onclick = () => pan(-1);
+    $('btn-pan-right').onclick = () => pan(1);
+    $('btn-fit').onclick = () => fitAll();
+
+    // Sync vertical scroll of labels and rows
+    const rows = $('tl-rows');
+    const labs = $('tl-labels');
+    rows.addEventListener('scroll', () => { labs.scrollTop = rows.scrollTop; });
+    labs.addEventListener('scroll', () => { rows.scrollTop = labs.scrollTop; });
+  }
+
+  function setupTabs() {
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        state.dashTab = btn.dataset.tab;
+        renderDashboard();
+      });
+    });
+  }
+
+  async function boot() {
+    loadLayout();
+    setupSplitters();
+    setupTabs();
+    initMap();
+    setupTimelineInteractions();
+    window.addEventListener('resize', () => {
+      renderTimeline();
+      invalidateMap();
+    });
+    try {
+      await loadVehicles();
+    } catch (e) {
+      $('header-meta').textContent = 'ClickHouse API unavailable: ' + e.message;
+      $('dash-body').innerHTML = `<div class="empty-msg">${esc(e.message)}<br>
+        Start collector with --clickhouse and ensure ClickHouse is running.</div>`;
+    }
+  }
+
+  boot();
+})();
+</script>
+</body>
+</html>

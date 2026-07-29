@@ -1,0 +1,18 @@
+{
+  "bind": "0.0.0.0",
+  "port": 9000,
+  "dataDir": "received_logs",
+  "logLevel": "INFO",
+  "maxUploadBytes": 16777216,
+  "clickhouse": {
+    "enabled": true,
+    "host": "192.168.18.112",
+    "port": 8123,
+    "database": "oati_vehicles",
+    "user": "oati_app",
+    "password": "YQB4yxs3Utog8cRGMWayCZ02KHVZWR"
+  },
+  "viewer": {
+    "activityGapMs": 120000
+  }
+}
