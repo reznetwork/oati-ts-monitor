@@ -124,10 +124,30 @@
   }
   .tl-toolbar button:hover { border-color: var(--accent); }
   .tl-toolbar .range { font-family: ui-monospace, monospace; font-size: 11px; color: var(--secondary); }
+  .tl-toolbar .tl-date-wrap {
+    display: inline-flex; align-items: center; gap: 6px; margin-left: 4px;
+    color: var(--secondary); font-size: 12px;
+  }
+  .tl-toolbar input[type="date"] {
+    background: var(--surface2); border: 1px solid var(--border-strong); color: var(--text);
+    border-radius: 5px; padding: 3px 8px; font-size: 12px; color-scheme: dark;
+  }
+  .tl-toolbar input[type="date"]:hover { border-color: var(--accent); }
   .tl-body { flex: 1; min-height: 0; display: grid; grid-template-columns: var(--label-w) 4px 1fr; }
   .tl-label-split { cursor: col-resize; background: var(--splitter); }
   .tl-label-split:hover { background: var(--accent); }
-  .tl-labels { overflow: auto; border-right: 1px solid var(--border); background: var(--surface2); }
+  .tl-labels-col {
+    display: flex; flex-direction: column; min-height: 0; overflow: hidden;
+    background: var(--surface2); border-right: 1px solid var(--border);
+  }
+  .tl-labels-head {
+    flex: 0 0 24px; border-bottom: 1px solid var(--border); background: var(--surface);
+  }
+  .tl-labels {
+    flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto;
+    scrollbar-width: none;
+  }
+  .tl-labels::-webkit-scrollbar { width: 0; height: 0; }
   .tl-label-row {
     height: 28px; display: flex; align-items: center; padding: 0 10px;
     border-bottom: 1px solid var(--border); font-size: 12px; cursor: pointer;
@@ -145,14 +165,33 @@
     position: absolute; top: 0; height: 100%; border-left: 1px solid var(--border);
     font-size: 10px; color: var(--muted); padding: 4px 0 0 4px; white-space: nowrap;
   }
-  .tl-rows { position: absolute; top: 24px; left: 0; right: 0; bottom: 0; overflow: auto; }
+  .tl-grid {
+    position: absolute; top: 24px; left: 0; right: 0; bottom: 0;
+    pointer-events: none; z-index: 0; overflow: hidden;
+  }
+  .tl-weekend {
+    position: absolute; top: 0; bottom: 0;
+    background: rgba(120, 145, 190, 0.07);
+  }
+  .tl-work-hours {
+    position: absolute; top: 0; bottom: 0;
+    background: rgba(255, 255, 255, 0.04);
+  }
+  .tl-day-div {
+    position: absolute; top: 0; bottom: 0; width: 1px;
+    background: rgba(255, 255, 255, 0.09);
+  }
+  .tl-rows {
+    position: absolute; top: 24px; left: 0; right: 0; bottom: 0;
+    overflow-x: hidden; overflow-y: auto; z-index: 1;
+  }
   .tl-row {
     position: relative; height: 28px; border-bottom: 1px solid rgba(255,255,255,.04); cursor: pointer;
   }
   .tl-row.selected { background: rgba(110,231,183,.06); }
   .tl-bar {
     position: absolute; top: 6px; height: 16px; border-radius: 3px;
-    background: var(--bar); opacity: .85; min-width: 2px;
+    background: var(--bar); opacity: .85;
   }
   .tl-row.selected .tl-bar { background: var(--bar-selected); }
   .tl-playhead {
@@ -200,14 +239,21 @@
       <button type="button" id="btn-pan-right">Pan →</button>
       <button type="button" id="btn-zoom-out">Zoom −</button>
       <button type="button" id="btn-zoom-in">Zoom +</button>
-      <button type="button" id="btn-fit">Fit all</button>
+      <label class="tl-date-wrap" title="Jump to date">
+        <span>Date</span>
+        <input type="date" id="tl-date">
+      </label>
       <span class="range" id="tl-range">—</span>
     </div>
     <div class="tl-body">
-      <div class="tl-labels" id="tl-labels"></div>
+      <div class="tl-labels-col">
+        <div class="tl-labels-head" aria-hidden="true"></div>
+        <div class="tl-labels" id="tl-labels"></div>
+      </div>
       <div class="tl-label-split" id="split-label" title="Drag to resize labels"></div>
       <div class="tl-canvas-wrap" id="tl-canvas-wrap">
         <div class="tl-axis" id="tl-axis"></div>
+        <div class="tl-grid" id="tl-grid"></div>
         <div class="tl-rows" id="tl-rows"></div>
         <div class="tl-playhead" id="tl-playhead"></div>
       </div>
@@ -491,6 +537,80 @@
     return state.viewFrom + (x / width) * span;
   }
 
+  function toDateInputValue(ms) {
+    const d = new Date(ms);
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  }
+
+  function syncDateInput() {
+    const el = $('tl-date');
+    if (!el || state.viewFrom == null) return;
+    const mid = (state.viewFrom + state.viewTo) / 2;
+    el.value = toDateInputValue(mid);
+    if (state.globalFrom != null) el.min = toDateInputValue(state.globalFrom);
+    if (state.globalTo != null) el.max = toDateInputValue(state.globalTo);
+  }
+
+  function renderDayGrid(width) {
+    const grid = $('tl-grid');
+    grid.innerHTML = '';
+    if (state.viewFrom == null || state.viewTo == null || state.viewTo <= state.viewFrom) return;
+
+    const start = new Date(state.viewFrom);
+    start.setHours(0, 0, 0, 0);
+    let dayStart = start.getTime();
+    if (dayStart > state.viewFrom) dayStart -= 86400000;
+
+    const maxDays = 400;
+    let n = 0;
+    while (dayStart < state.viewTo && n < maxDays) {
+      const dayEnd = dayStart + 86400000;
+      const day = new Date(dayStart);
+      const dow = day.getDay();
+      const isWeekend = dow === 0 || dow === 6;
+      const left = msToX(dayStart, width);
+      const right = msToX(dayEnd, width);
+      const colLeft = Math.max(0, left);
+      const colRight = Math.min(width, right);
+
+      if (colRight > colLeft) {
+        if (isWeekend) {
+          const we = document.createElement('div');
+          we.className = 'tl-weekend';
+          we.style.left = colLeft + 'px';
+          we.style.width = (colRight - colLeft) + 'px';
+          grid.appendChild(we);
+        }
+
+        const whFrom = dayStart + 7 * 3600000;
+        const whTo = dayStart + 19 * 3600000;
+        const wLeft = Math.max(colLeft, msToX(whFrom, width));
+        const wRight = Math.min(colRight, msToX(whTo, width));
+        if (wRight > wLeft) {
+          const wh = document.createElement('div');
+          wh.className = 'tl-work-hours';
+          wh.style.left = wLeft + 'px';
+          wh.style.width = (wRight - wLeft) + 'px';
+          grid.appendChild(wh);
+        }
+      }
+
+      if (dayStart >= state.viewFrom - 1 && dayStart <= state.viewTo + 1) {
+        const x = msToX(dayStart, width);
+        if (x >= -1 && x <= width + 1) {
+          const div = document.createElement('div');
+          div.className = 'tl-day-div';
+          div.style.left = Math.round(x) + 'px';
+          grid.appendChild(div);
+        }
+      }
+
+      dayStart = dayEnd;
+      n += 1;
+    }
+  }
+
   function renderTimeline() {
     const wrap = $('tl-canvas-wrap');
     const width = wrap.clientWidth || 1;
@@ -501,6 +621,7 @@
     labels.innerHTML = '';
     rowsEl.innerHTML = '';
     axis.innerHTML = '';
+    renderDayGrid(width);
 
     const order = state.vehicleOrder.length
       ? state.vehicleOrder
@@ -520,10 +641,16 @@
       for (const bar of state.bars.filter(b => b.vehicle_short === vs)) {
         const left = msToX(bar.from_ms, width);
         const right = msToX(bar.to_ms, width);
+        const clippedLeft = Math.max(0, left);
+        const clippedRight = Math.min(width, right);
+        if (clippedRight <= clippedLeft) continue;
+        let barW = Math.max(2, clippedRight - clippedLeft);
+        if (clippedLeft + barW > width) barW = width - clippedLeft;
+        if (barW <= 0) continue;
         const el = document.createElement('div');
         el.className = 'tl-bar';
-        el.style.left = Math.max(0, left) + 'px';
-        el.style.width = Math.max(2, right - left) + 'px';
+        el.style.left = clippedLeft + 'px';
+        el.style.width = barW + 'px';
         el.title = `${vs}\n${fmtTs(bar.raw_from_ms || bar.from_ms)} → ${fmtTs(bar.raw_to_ms || bar.to_ms)}`;
         el.addEventListener('click', (e) => {
           e.stopPropagation();
@@ -554,6 +681,7 @@
 
     $('tl-range').textContent =
       `${fmtTs(state.viewFrom)}  …  ${fmtTs(state.viewTo)}`;
+    syncDateInput();
 
     positionPlayhead();
   }
@@ -668,6 +796,42 @@
     renderTrack();
   }
 
+  let viewAnimRaf = null;
+
+  function animateViewTo(newFrom, newTo, duration) {
+    duration = duration == null ? 220 : duration;
+    if (viewAnimRaf != null) {
+      cancelAnimationFrame(viewAnimRaf);
+      viewAnimRaf = null;
+    }
+    const fromA = state.viewFrom;
+    const toA = state.viewTo;
+    if (!Number.isFinite(fromA) || !Number.isFinite(toA) || duration <= 0) {
+      state.viewFrom = newFrom;
+      state.viewTo = newTo;
+      return refreshActivity().then(() => loadTrack());
+    }
+    const start = performance.now();
+    return new Promise((resolve) => {
+      const tick = (now) => {
+        const t = Math.min(1, (now - start) / duration);
+        const e = 1 - Math.pow(1 - t, 3);
+        state.viewFrom = fromA + (newFrom - fromA) * e;
+        state.viewTo = toA + (newTo - toA) * e;
+        renderTimeline();
+        if (t < 1) {
+          viewAnimRaf = requestAnimationFrame(tick);
+        } else {
+          viewAnimRaf = null;
+          state.viewFrom = newFrom;
+          state.viewTo = newTo;
+          refreshActivity().then(() => loadTrack()).then(resolve);
+        }
+      };
+      viewAnimRaf = requestAnimationFrame(tick);
+    });
+  }
+
   function zoom(factor, centerMs) {
     const span = state.viewTo - state.viewFrom;
     const mid = centerMs != null ? centerMs : (state.viewFrom + state.viewTo) / 2;
@@ -675,9 +839,7 @@
     const minSpan = 1000;
     const maxSpan = Math.max(minSpan, (state.globalTo - state.globalFrom) * 1.2);
     newSpan = Math.min(maxSpan, Math.max(minSpan, newSpan));
-    state.viewFrom = mid - newSpan / 2;
-    state.viewTo = mid + newSpan / 2;
-    refreshActivity().then(() => loadTrack());
+    animateViewTo(mid - newSpan / 2, mid + newSpan / 2);
   }
 
   function pan(dir) {
@@ -688,11 +850,21 @@
     refreshActivity().then(() => loadTrack());
   }
 
-  function fitAll() {
-    if (state.globalFrom == null) return;
-    state.viewFrom = state.globalFrom;
-    state.viewTo = state.globalTo;
-    refreshActivity().then(() => loadTrack());
+  function jumpToDate(dateStr) {
+    if (!dateStr) return;
+    const parts = dateStr.split('-').map(Number);
+    if (parts.length !== 3 || parts.some(n => !Number.isFinite(n))) return;
+    const start = new Date(parts[0], parts[1] - 1, parts[2], 0, 0, 0, 0).getTime();
+    const end = start + 86400000;
+    const mid = start + 12 * 3600000;
+    if (state.playheadMs == null || state.playheadMs < start || state.playheadMs >= end) {
+      state.playheadMs = mid;
+      updateHeader();
+    }
+    animateViewTo(start, end).then(() => {
+      if (state.selected) return Promise.all([loadSlice(), loadTrack()]);
+      return loadSlice();
+    });
   }
 
   function setupTimelineInteractions() {
@@ -746,7 +918,6 @@
       zoom(e.deltaY < 0 ? 1.25 : 0.8, center);
     }, { passive: false });
 
-    // Drag empty background to pan (middle mouse or drag on axis area)
     wrap.addEventListener('mousedown', (e) => {
       if (e.button === 1) {
         e.preventDefault();
@@ -759,9 +930,18 @@
     $('btn-zoom-out').onclick = () => zoom(0.7, state.playheadMs);
     $('btn-pan-left').onclick = () => pan(-1);
     $('btn-pan-right').onclick = () => pan(1);
-    $('btn-fit').onclick = () => fitAll();
+    $('tl-date').addEventListener('change', (e) => jumpToDate(e.target.value));
 
-    // Sync vertical scroll of labels and rows
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      const tag = (e.target && e.target.tagName) || '';
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (e.target && e.target.isContentEditable)) {
+        return;
+      }
+      e.preventDefault();
+      pan(e.key === 'ArrowLeft' ? -1 : 1);
+    });
+
     const rows = $('tl-rows');
     const labs = $('tl-labels');
     rows.addEventListener('scroll', () => { labs.scrollTop = rows.scrollTop; });
