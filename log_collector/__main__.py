@@ -66,10 +66,20 @@ def build_parser() -> argparse.ArgumentParser:
                    help="ClickHouse username (overrides config)")
     p.add_argument("--clickhouse-password", default="",
                    help="ClickHouse password (overrides config)")
+    p.add_argument(
+        "--backfill-on-startup",
+        action="store_true",
+        help="Ingest outstanding received_logs into ClickHouse at startup (default from config, on)",
+    )
+    p.add_argument(
+        "--no-backfill-on-startup",
+        action="store_true",
+        help="Skip scanning received_logs for outstanding ClickHouse ingest at startup",
+    )
     p.add_argument("--backfill", action="store_true",
                    help="Backfill existing received_logs into ClickHouse then exit")
     p.add_argument("--backfill-and-serve", action="store_true",
-                   help="Backfill existing received_logs then start the server")
+                   help="Backfill existing received_logs then start the server (same as default when ClickHouse is on)")
     return p
 
 
@@ -94,6 +104,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.backfill or args.backfill_and_serve:
         cfg.clickhouse_enabled = True
+        cfg.clickhouse_backfill_on_startup = True
 
     logging.basicConfig(
         level=getattr(logging, cfg.log_level, logging.INFO),
@@ -117,16 +128,26 @@ def main(argv: list[str] | None = None) -> int:
     )
     ch_store = try_create_store(ch_config)
 
-    if args.backfill or args.backfill_and_serve:
+    do_backfill = bool(
+        ch_store is not None
+        and (
+            args.backfill
+            or args.backfill_and_serve
+            or cfg.clickhouse_backfill_on_startup
+        )
+    )
+    if do_backfill:
         if ch_store is None:
             logging.error(
-                "ClickHouse is required for --backfill (enable in config or pass --clickhouse)"
+                "ClickHouse is required for backfill (enable in config or pass --clickhouse)"
             )
             return 1
         stats = backfill_data_dir(ch_store, cfg.data_dir)
-        logging.info("Backfill complete: %s", stats)
+        logging.info("Startup backfill stats: %s", stats)
         if args.backfill and not args.backfill_and_serve:
             return 0
+    elif cfg.clickhouse_enabled and ch_store is not None:
+        logging.info("Startup backfill skipped (clickhouse.backfillOnStartup=false)")
 
     app = make_app(
         storage,

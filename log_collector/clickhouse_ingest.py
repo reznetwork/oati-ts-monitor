@@ -231,14 +231,27 @@ def ingest_file_path(
 def backfill_data_dir(store: ClickHouseStore, data_dir: Union[str, Path]) -> Dict[str, int]:
     """Walk received_logs layout and ingest any not-yet-ingested segments."""
     root = Path(data_dir).expanduser().resolve()
-    stats = {"ok": 0, "skipped": 0, "empty": 0, "errors": 0}
-    paths = sorted([*root.rglob("segment_*.jsonl.gz"), *root.rglob("segment_*.jsonl")])
+    stats = {"ok": 0, "skipped": 0, "empty": 0, "errors": 0, "found": 0, "outstanding": 0}
+    if not root.is_dir():
+        logger.info("Backfill: data dir %s does not exist yet", root)
+        return stats
+
+    paths = sorted({*root.rglob("segment_*.jsonl.gz"), *root.rglob("segment_*.jsonl")})
+    # Deduplicate if both .jsonl and .jsonl.gz somehow match (gz only for .gz names)
+    paths = [p for p in paths if p.is_file()]
+    stats["found"] = len(paths)
+    logger.info("Backfill: scanning %d segment file(s) under %s", len(paths), root)
+
     for seg_path in paths:
         parts = seg_path.relative_to(root).parts
         if len(parts) < 3:
             continue
         device_id, vehicle_short, segment = parts[0], parts[1], parts[-1]
         try:
+            if store.is_segment_ingested(device_id, vehicle_short, segment):
+                stats["skipped"] += 1
+                continue
+            stats["outstanding"] += 1
             result = ingest_file_path(
                 store,
                 seg_path,
@@ -248,8 +261,22 @@ def backfill_data_dir(store: ClickHouseStore, data_dir: Union[str, Path]) -> Dic
                 segment=segment,
             )
             status = result.get("status", "ok")
-            stats[status] = stats.get(status, 0) + 1
+            # ingest_file_path may still report skipped/empty
+            if status == "ok":
+                stats["ok"] += 1
+            else:
+                stats[status] = stats.get(status, 0) + 1
         except Exception:
             logger.exception("Backfill failed for %s", seg_path)
             stats["errors"] += 1
+
+    logger.info(
+        "Backfill complete: found=%d outstanding=%d ingested=%d skipped=%d empty=%d errors=%d",
+        stats["found"],
+        stats["outstanding"],
+        stats["ok"],
+        stats["skipped"],
+        stats["empty"],
+        stats["errors"],
+    )
     return stats

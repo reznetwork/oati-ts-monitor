@@ -10,7 +10,8 @@
     "port": 8123,
     "database": "oati_logs",
     "user": "default",
-    "password": ""
+    "password": "",
+    "backfillOnStartup": true
   },
   "viewer": {
     "activityGapMs": 120000

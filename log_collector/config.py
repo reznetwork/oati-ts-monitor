@@ -28,6 +28,7 @@ class CollectorConfig:
     clickhouse_db: str = "oati_logs"
     clickhouse_user: str = "default"
     clickhouse_password: str = ""
+    clickhouse_backfill_on_startup: bool = True
     activity_gap_ms: int = 120_000
     config_path: Optional[str] = None
 
@@ -76,6 +77,11 @@ def config_from_dict(data: dict[str, Any], *, config_path: Optional[str] = None)
             cfg.clickhouse_user = str(ch.get("user") or ch.get("username"))
         if "password" in ch:
             cfg.clickhouse_password = str(ch["password"])
+        if "backfillOnStartup" in ch or "backfill_on_startup" in ch:
+            raw = ch.get("backfillOnStartup")
+            if raw is None:
+                raw = ch.get("backfill_on_startup")
+            cfg.clickhouse_backfill_on_startup = bool(raw)
 
     viewer = data.get("viewer")
     if isinstance(viewer, dict):
@@ -127,6 +133,10 @@ def merge_cli_overrides(cfg: CollectorConfig, args: Any, *, cli_explicit: set[st
         cfg.clickhouse_user = args.clickhouse_user
     if "clickhouse_password" in cli_explicit:
         cfg.clickhouse_password = args.clickhouse_password
+    if "no_backfill_on_startup" in cli_explicit and getattr(args, "no_backfill_on_startup", False):
+        cfg.clickhouse_backfill_on_startup = False
+    if "backfill_on_startup" in cli_explicit and getattr(args, "backfill_on_startup", False):
+        cfg.clickhouse_backfill_on_startup = True
     return cfg
 
 
@@ -145,6 +155,8 @@ def explicit_cli_dests(argv: list[str]) -> set[str]:
         "--clickhouse-user": "clickhouse_user",
         "--clickhouse-password": "clickhouse_password",
         "--config": "config",
+        "--no-backfill-on-startup": "no_backfill_on_startup",
+        "--backfill-on-startup": "backfill_on_startup",
     }
     found: set[str] = set()
     for token in argv:

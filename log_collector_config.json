@@ -10,7 +10,8 @@
     "port": 8123,
     "database": "oati_vehicles",
     "user": "oati_app",
-    "password": "YQB4yxs3Utog8cRGMWayCZ02KHVZWR"
+    "password": "YQB4yxs3Utog8cRGMWayCZ02KHVZWR",
+    "backfillOnStartup": true
   },
   "viewer": {
     "activityGapMs": 120000
