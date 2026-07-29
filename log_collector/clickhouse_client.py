@@ -28,7 +28,7 @@ def _validate_db_name(name: str) -> str:
     return db
 
 
-def _ddl_statements(database: str) -> tuple[str, ...]:
+def _ddl_statements(database: str, *, modern_h3_order: bool = True) -> tuple[str, ...]:
     """DDL with fully-qualified table names (HTTP has no persistent USE session)."""
     db = _validate_db_name(database)
     return (
@@ -73,6 +73,67 @@ def _ddl_statements(database: str) -> tuple[str, ...]:
             ingested_at DateTime64(3) DEFAULT now64(3)
         ) ENGINE = ReplacingMergeTree(ingested_at)
         ORDER BY (device_id, vehicle_short, segment)
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS {db}.wifi_quality_samples (
+            device_id String,
+            vehicle String,
+            vehicle_short String,
+            segment String,
+            ts_ms Int64,
+            lat Float64,
+            lon Float64,
+            bssid String,
+            rssi_dbm Nullable(Float64),
+            signal_avg_dbm Nullable(Float64),
+            noise_dbm Nullable(Float64),
+            tx_rate_mbps Nullable(Float64),
+            rx_rate_mbps Nullable(Float64),
+            tx_traffic_mbps Nullable(Float64),
+            rx_traffic_mbps Nullable(Float64),
+            gateway_latency_ms Nullable(Float64),
+            gateway_ok Nullable(UInt8),
+            beacon_loss_count Nullable(Float64),
+            roam_count UInt8 DEFAULT 0,
+            ingested_at DateTime64(3) DEFAULT now64(3)
+        ) ENGINE = ReplacingMergeTree(ingested_at)
+        ORDER BY (vehicle_short, ts_ms, device_id, segment, bssid, roam_count)
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS {db}.wifi_quality_ingested_segments (
+            device_id String,
+            vehicle_short String,
+            segment String,
+            sample_count UInt64,
+            ingested_at DateTime64(3) DEFAULT now64(3)
+        ) ENGINE = ReplacingMergeTree(ingested_at)
+        ORDER BY (device_id, vehicle_short, segment)
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS {db}.wifi_quality_rollups (
+            device_id String,
+            segment String,
+            bucket_ms Int64,
+            h3_11 UInt64,
+            vehicle_short String,
+            bssid String,
+            sample_count UInt64,
+            rssi_sum Float64,
+            rssi_count UInt64,
+            latency_sum Float64,
+            latency_count UInt64,
+            gateway_ok_sum UInt64,
+            gateway_ok_count UInt64,
+            link_rate_sum Float64,
+            link_rate_count UInt64,
+            traffic_rate_sum Float64,
+            traffic_rate_count UInt64,
+            beacon_loss_sum Float64,
+            beacon_loss_count UInt64,
+            roam_count UInt64,
+            ingested_at DateTime64(3) DEFAULT now64(3)
+        ) ENGINE = ReplacingMergeTree(ingested_at)
+        ORDER BY (device_id, vehicle_short, segment, bucket_ms, h3_11, bssid)
         """,
     )
 
@@ -122,6 +183,8 @@ class ClickHouseStore:
         self._local = threading.local()
         self._schema_lock = threading.Lock()
         self._schema_ready = False
+        self._modern_h3_order = True
+        self._modern_h3_geo_order = True
         if not config.enabled:
             return
         try:
@@ -168,7 +231,16 @@ class ClickHouseStore:
             bootstrap = self._new_client(database="default")
             try:
                 bootstrap.command(f"CREATE DATABASE IF NOT EXISTS {db}")
-                for stmt in _ddl_statements(db):
+                version_result = bootstrap.query("SELECT version()")
+                version_text = str(version_result.result_rows[0][0])
+                try:
+                    major, minor = (int(v) for v in version_text.split(".")[:2])
+                except (TypeError, ValueError):
+                    major, minor = (25, 5)
+                modern_h3_order = (major, minor) >= (25, 5)
+                self._modern_h3_order = modern_h3_order
+                self._modern_h3_geo_order = (major, minor) >= (25, 1)
+                for stmt in _ddl_statements(db, modern_h3_order=modern_h3_order):
                     bootstrap.command(stmt.strip())
             finally:
                 try:
@@ -238,6 +310,90 @@ class ClickHouseStore:
                 "rssi_dbm",
                 "bssid",
             ],
+            database=self.config.database,
+        )
+
+    def insert_wifi_quality_samples(self, rows: Sequence[Sequence[Any]]) -> None:
+        """Insert normalized geospatial Wi-Fi observations used by the analyzer."""
+        if not rows:
+            return
+        client = self._require()
+        client.insert(
+            "wifi_quality_samples",
+            rows,
+            column_names=[
+                "device_id", "vehicle", "vehicle_short", "segment", "ts_ms",
+                "lat", "lon", "bssid", "rssi_dbm", "signal_avg_dbm",
+                "noise_dbm", "tx_rate_mbps", "rx_rate_mbps",
+                "tx_traffic_mbps", "rx_traffic_mbps", "gateway_latency_ms",
+                "gateway_ok", "beacon_loss_count", "roam_count",
+            ],
+            database=self.config.database,
+        )
+
+    def rebuild_quality_segment_rollup(
+        self, device_id: str, vehicle_short: str, segment: str
+    ) -> None:
+        """Insert a deterministic, replaceable rollup for one source segment."""
+        h3_expression = (
+            "geoToH3(lat, lon, 11)" if self._modern_h3_order
+            else "geoToH3(lon, lat, 11)"
+        )
+        self._require().command(
+            f"""
+            INSERT INTO {self.config.database}.wifi_quality_rollups
+            (
+                device_id,segment,bucket_ms,h3_11,vehicle_short,bssid,
+                sample_count,rssi_sum,rssi_count,latency_sum,latency_count,
+                gateway_ok_sum,gateway_ok_count,link_rate_sum,link_rate_count,
+                traffic_rate_sum,traffic_rate_count,beacon_loss_sum,
+                beacon_loss_count,roam_count
+            )
+            SELECT
+                device_id,segment,intDiv(ts_ms,300000)*300000,{h3_expression},
+                vehicle_short,bssid,countIf(roam_count=0),
+                sum(ifNull(rssi_dbm,0.0)),count(rssi_dbm),
+                sum(ifNull(gateway_latency_ms,0.0)),count(gateway_latency_ms),
+                toUInt64(sum(ifNull(gateway_ok,0))),count(gateway_ok),
+                sum(greatest(ifNull(tx_rate_mbps,0.0),ifNull(rx_rate_mbps,0.0))),
+                countIf(tx_rate_mbps IS NOT NULL OR rx_rate_mbps IS NOT NULL),
+                sum(greatest(ifNull(tx_traffic_mbps,0.0),ifNull(rx_traffic_mbps,0.0))),
+                countIf(tx_traffic_mbps IS NOT NULL OR rx_traffic_mbps IS NOT NULL),
+                sum(ifNull(beacon_loss_count,0.0)),count(beacon_loss_count),
+                toUInt64(sum(roam_count))
+            FROM {self.config.database}.wifi_quality_samples FINAL
+            WHERE device_id={{device_id:String}}
+              AND vehicle_short={{vehicle_short:String}}
+              AND segment={{segment:String}}
+            GROUP BY device_id,segment,bucket_ms,h3_11,vehicle_short,bssid
+            """,
+            parameters={
+                "device_id": device_id, "vehicle_short": vehicle_short, "segment": segment
+            },
+        )
+
+    def is_quality_segment_ingested(
+        self, device_id: str, vehicle_short: str, segment: str
+    ) -> bool:
+        result = self._require().query(
+            f"""
+            SELECT count() FROM {self.config.database}.wifi_quality_ingested_segments FINAL
+            WHERE device_id={{device_id:String}} AND vehicle_short={{vehicle_short:String}}
+              AND segment={{segment:String}}
+            """,
+            parameters={
+                "device_id": device_id, "vehicle_short": vehicle_short, "segment": segment
+            },
+        )
+        return bool(result.result_rows and result.result_rows[0][0])
+
+    def mark_quality_segment_ingested(
+        self, device_id: str, vehicle_short: str, segment: str, sample_count: int
+    ) -> None:
+        self._require().insert(
+            "wifi_quality_ingested_segments",
+            [[device_id, vehicle_short, segment, int(sample_count)]],
+            column_names=["device_id", "vehicle_short", "segment", "sample_count"],
             database=self.config.database,
         )
 
@@ -445,6 +601,122 @@ class ClickHouseStore:
                 }
             )
         return {"samples": samples, "roaming": roaming}
+
+    def discovered_bssids(
+        self, *, device_id: Optional[str] = None, vehicle_short: Optional[str] = None,
+        segment: Optional[str] = None
+    ) -> List[dict]:
+        """Return strongest geolocated observation for every known BSSID."""
+        client = self._require()
+        filters = ["bssid != ''", "bssid != 'unknown'"]
+        params: dict[str, Any] = {}
+        if device_id is not None:
+            filters.append("device_id={device_id:String}")
+            params["device_id"] = device_id
+        if vehicle_short is not None:
+            filters.append("vehicle_short={vehicle_short:String}")
+            params["vehicle_short"] = vehicle_short
+        if segment is not None:
+            filters.append("segment={segment:String}")
+            params["segment"] = segment
+        result = client.query(
+            f"""
+            SELECT
+                bssid,
+                argMax(lat, ifNull(rssi_dbm, -999.0)) AS lat,
+                argMax(lon, ifNull(rssi_dbm, -999.0)) AS lon,
+                max(rssi_dbm) AS strongest_rssi,
+                min(ts_ms) AS first_seen_ms,
+                max(ts_ms) AS last_seen_ms
+            FROM {self.config.database}.wifi_quality_samples FINAL
+            WHERE {' AND '.join(filters)}
+            GROUP BY bssid
+            ORDER BY bssid
+            """,
+            parameters=params,
+        )
+        return [
+            {
+                "bssid": str(row[0]), "lat": float(row[1]), "lon": float(row[2]),
+                "rssi_dbm": float(row[3]) if row[3] is not None else None,
+                "first_seen_ms": int(row[4]), "last_seen_ms": int(row[5]),
+            }
+            for row in result.result_rows
+        ]
+
+    def wifi_quality_cells(
+        self,
+        *,
+        from_ms: int,
+        to_ms: int,
+        vehicles: Sequence[str],
+        bssids: Sequence[str],
+        resolution: int,
+        bounds: Optional[Sequence[float]] = None,
+        limit: int = 12_000,
+    ) -> List[dict]:
+        """Aggregate normalized metric states into viewport-aware H3 cells."""
+        client = self._require()
+        resolution = max(4, min(11, int(resolution)))
+        where = [
+            "bucket_ms >= {from_ms:Int64}",
+            "bucket_ms <= {to_ms:Int64}",
+            "(empty({vehicles:Array(String)}) OR has({vehicles:Array(String)}, vehicle_short))",
+            "(empty({bssids:Array(String)}) OR has({bssids:Array(String)}, bssid))",
+        ]
+        params: dict[str, Any] = {
+            "from_ms": int(from_ms) // 300_000 * 300_000,
+            "to_ms": int(to_ms) // 300_000 * 300_000,
+            "vehicles": list(vehicles), "bssids": list(bssids),
+            "resolution": resolution, "limit": max(1, min(int(limit), 20_000)),
+        }
+        if bounds and len(bounds) == 4:
+            south, west, north, east = (float(v) for v in bounds)
+            # Filter by the center of the fine-resolution source cell.
+            lat_index, lon_index = ((1, 2) if self._modern_h3_geo_order else (2, 1))
+            where.extend([
+                f"tupleElement(h3ToGeo(h3_11), {lat_index}) BETWEEN {{south:Float64}} AND {{north:Float64}}",
+                f"tupleElement(h3ToGeo(h3_11), {lon_index}) BETWEEN {{west:Float64}} AND {{east:Float64}}",
+            ])
+            params.update({"south": south, "west": west, "north": north, "east": east})
+        result = client.query(
+            f"""
+            SELECT
+                h3ToParent(h3_11, {{resolution:UInt8}}) AS cell,
+                h3ToGeoBoundary(cell) AS boundary,
+                groupUniqArray(20)(vehicle_short) AS vehicles,
+                groupUniqArray(20)(bssid) AS bssids,
+                sum(sample_count), sum(rssi_sum), sum(rssi_count),
+                sum(latency_sum), sum(latency_count),
+                sum(gateway_ok_sum), sum(gateway_ok_count),
+                sum(link_rate_sum), sum(link_rate_count),
+                sum(traffic_rate_sum), sum(traffic_rate_count),
+                sum(beacon_loss_sum), sum(beacon_loss_count), sum(roam_count)
+            FROM {self.config.database}.wifi_quality_rollups FINAL
+            WHERE {' AND '.join(where)}
+            GROUP BY cell
+            ORDER BY sum(sample_count) DESC
+            LIMIT {{limit:UInt32}}
+            """,
+            parameters=params,
+        )
+        fields = (
+            "sample_count", "rssi_sum", "rssi_count", "latency_sum", "latency_count",
+            "gateway_ok_sum", "gateway_ok_count", "link_rate_sum", "link_rate_count",
+            "traffic_rate_sum", "traffic_rate_count", "beacon_loss_sum",
+            "beacon_loss_count", "roam_count",
+        )
+        out: List[dict] = []
+        for row in result.result_rows:
+            boundary = [[float(p[0]), float(p[1])] for p in (row[1] or [])]
+            item = {
+                "cell": str(row[0]), "boundary": boundary,
+                "vehicles": [str(v) for v in (row[2] or [])],
+                "bssids": [str(v) for v in (row[3] or [])],
+            }
+            item.update({name: float(value or 0) for name, value in zip(fields, row[4:])})
+            out.append(item)
+        return out
 
 
 def _safe_json(value: Any) -> Any:

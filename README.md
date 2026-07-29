@@ -199,6 +199,49 @@ sudo systemctl enable --now oati-ts-monitor-log-collector.service
 
 The collector listens at `http://<host>:9000/ingest` and shows its dashboard at `http://<host>:9000/`.
 
+### Historical Replay and Wi-Fi Quality
+
+`/viewer` is one application with two modes:
+
+- **Historical Replay** retains the vehicle timeline, state snapshot, route, and roaming replay.
+- **Wi-Fi Quality** aggregates selected vehicles/base stations into zoom-aware H3 cells and scores RSSI, gateway availability/latency, traffic or link rate, beacon loss, and roaming.
+
+The default analysis warning threshold is 90 days. An operator can explicitly run a
+larger request after acknowledging the warning. Map requests are also bounded by the
+current viewport and H3 resolution.
+
+Mutable base-station mappings and quality profiles are stored in the SQLite file set by
+`viewer.metadataDb`. ClickHouse remains the telemetry source. New BSSIDs are discovered
+automatically and initially mapped one-to-one to a base station at their strongest RSSI
+sample; the catalog can rename stations, edit coordinates, and merge several BSSIDs.
+
+To enable the single-admin login, generate a password hash without putting the cleartext
+password in configuration:
+
+```bash
+python3 -m log_collector --hash-password
+```
+
+Copy the printed value into `auth.passwordHash`, set `auth.enabled` to `true`, and use
+TLS at the reverse proxy. Set `auth.secureCookie` to `true` when the viewer is served
+over HTTPS. Authentication protects browser pages and human APIs; vehicle `/ingest`
+uploads remain available to existing daemons.
+
+Schema setup is additive and runs when the collector connects to ClickHouse. Run a
+one-shot backfill after upgrading to populate normalized Wi-Fi analytics for retained
+segments:
+
+```bash
+python3 -m log_collector --config log_collector_config.json --backfill
+```
+
+Back up both ClickHouse and `viewer.metadataDb`; the SQLite file contains catalog
+corrections, score profiles, and active sessions. For rollback, stop the collector,
+restore the previous binary/configuration, and retain the added ClickHouse tables—they
+do not alter the original full-log tables and can be removed later after verification.
+Public OSM tiles are configured by default; change `viewer.tileUrl` and
+`viewer.tileAttribution` when an internal tile service becomes available.
+
 ## `monitor_config.json` documentation
 
 The daemon/client use a single JSON config file (default: `monitor_config.json`). Key top-level sections:

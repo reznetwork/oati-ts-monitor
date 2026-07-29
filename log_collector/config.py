@@ -30,6 +30,15 @@ class CollectorConfig:
     clickhouse_password: str = ""
     clickhouse_backfill_on_startup: bool = True
     activity_gap_ms: int = 120_000
+    metadata_db: str = "collector_metadata.sqlite3"
+    auth_enabled: bool = False
+    admin_username: str = "admin"
+    admin_password_hash: str = ""
+    session_hours: int = 12
+    secure_cookie: bool = False
+    max_analysis_days: int = 90
+    tile_url: str = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+    tile_attribution: str = "© OpenStreetMap contributors"
     config_path: Optional[str] = None
 
     @classmethod
@@ -87,6 +96,34 @@ def config_from_dict(data: dict[str, Any], *, config_path: Optional[str] = None)
     if isinstance(viewer, dict):
         if "activityGapMs" in viewer or "activity_gap_ms" in viewer:
             cfg.activity_gap_ms = int(viewer.get("activityGapMs") or viewer.get("activity_gap_ms"))
+        if "metadataDb" in viewer or "metadata_db" in viewer:
+            cfg.metadata_db = str(viewer.get("metadataDb") or viewer.get("metadata_db"))
+        if "maxAnalysisDays" in viewer or "max_analysis_days" in viewer:
+            cfg.max_analysis_days = int(
+                viewer.get("maxAnalysisDays") or viewer.get("max_analysis_days")
+            )
+        if "tileUrl" in viewer or "tile_url" in viewer:
+            cfg.tile_url = str(viewer.get("tileUrl") or viewer.get("tile_url"))
+        if "tileAttribution" in viewer or "tile_attribution" in viewer:
+            cfg.tile_attribution = str(
+                viewer.get("tileAttribution") or viewer.get("tile_attribution")
+            )
+
+    auth = data.get("auth")
+    if isinstance(auth, dict):
+        if "enabled" in auth:
+            cfg.auth_enabled = bool(auth["enabled"])
+        if "username" in auth:
+            cfg.admin_username = str(auth["username"])
+        if "passwordHash" in auth or "password_hash" in auth:
+            cfg.admin_password_hash = str(
+                auth.get("passwordHash") or auth.get("password_hash") or ""
+            )
+        if "sessionHours" in auth or "session_hours" in auth:
+            cfg.session_hours = int(auth.get("sessionHours") or auth.get("session_hours"))
+        if "secureCookie" in auth or "secure_cookie" in auth:
+            raw = auth.get("secureCookie")
+            cfg.secure_cookie = bool(raw if raw is not None else auth.get("secure_cookie"))
 
     return cfg
 

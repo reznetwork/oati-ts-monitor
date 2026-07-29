@@ -20,6 +20,7 @@ Recommends:
  wireless-tools,
 Suggests:
  python3-folium,
+ python3-clickhouse-connect,
 Description: Vehicle Modbus monitor daemon and client
  oati-ts-monitor polls Modbus TCP controllers, optional GNSS/Wi‑Fi enrichment,
  an HTTP dashboard, JSONL logging, and a local IPC socket for CLI/TUI clients.

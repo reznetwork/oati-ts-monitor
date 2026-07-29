@@ -31,9 +31,12 @@ from typing import Any, Optional
 
 from aiohttp import web
 
+from .auth import AuthManager, auth_middleware
 from .clickhouse_client import ClickHouseStore, ClickHouseUnavailable
 from .clickhouse_ingest import backfill_data_dir, ingest_payload_to_clickhouse
+from .metadata_store import MetadataStore
 from .storage import ChunkStorage
+from .wifi_quality import WiFiQualityService
 from http_header_text import decode_http_header_text
 
 logger = logging.getLogger(__name__)
@@ -99,6 +102,14 @@ async def handle_ingest(request: web.Request) -> web.Response:
                 segment=segment,
                 payload=payload,
             )
+            quality: Optional[WiFiQualityService] = request.app.get("wifi_quality")
+            if quality is not None:
+                await asyncio.to_thread(
+                    quality.sync_catalog,
+                    device_id=device_id,
+                    vehicle_short=vehicle_short,
+                    segment=segment,
+                )
         except Exception:
             logger.exception(
                 "ClickHouse ingest failed for %s/%s/%s (file stored on disk)",
@@ -267,9 +278,197 @@ async def handle_api_track(request: web.Request) -> web.Response:
     return _json({"vehicle_short": vehicle_short, "from_ms": from_ms, "to_ms": to_ms, **track})
 
 
+async def handle_app_config(request: web.Request) -> web.Response:
+    session = request.get("admin_session") or {}
+    auth: Optional[AuthManager] = request.app.get("auth")
+    auth_enabled = bool(auth is not None and auth.enabled)
+    return _json(
+        {
+            "tile_url": request.app.get("tile_url"),
+            "tile_attribution": request.app.get("tile_attribution"),
+            "max_analysis_days": request.app.get("max_analysis_days", 90),
+            "csrf_token": session.get("csrf_token"),
+            "auth_enabled": auth_enabled,
+            "authenticated": bool(session) or not auth_enabled,
+        }
+    )
+
+
+def _quality_service(request: web.Request) -> WiFiQualityService:
+    service: Optional[WiFiQualityService] = request.app.get("wifi_quality")
+    if service is None:
+        raise web.HTTPServiceUnavailable(reason="Wi-Fi quality analytics requires ClickHouse")
+    return service
+
+
+def _metadata(request: web.Request) -> MetadataStore:
+    store: Optional[MetadataStore] = request.app.get("metadata")
+    if store is None:
+        raise web.HTTPServiceUnavailable(reason="Metadata store is not configured")
+    return store
+
+
+def _csv_values(request: web.Request, name: str) -> list[str]:
+    values: list[str] = []
+    for raw in request.rel_url.query.getall(name, []):
+        values.extend(v.strip() for v in raw.split(",") if v.strip())
+    return values
+
+
+async def handle_wifi_quality(request: web.Request) -> web.Response:
+    q = request.rel_url.query
+    try:
+        from_ms, to_ms = int(q["from_ms"]), int(q["to_ms"])
+        resolution = int(q.get("resolution", "9"))
+        profile_id = int(q["profile_id"]) if q.get("profile_id") else None
+        station_ids = [int(v) for v in _csv_values(request, "station_ids")]
+        bounds = [float(v) for v in q["bounds"].split(",")] if q.get("bounds") else None
+        result = await asyncio.to_thread(
+            _quality_service(request).heatmap,
+            from_ms=from_ms,
+            to_ms=to_ms,
+            vehicles=_csv_values(request, "vehicles"),
+            station_ids=station_ids,
+            profile_id=profile_id,
+            resolution=resolution,
+            bounds=bounds,
+            allow_large_range=q.get("allow_large_range") in ("1", "true", "yes"),
+        )
+    except OverflowError as exc:
+        return _json({"error": str(exc), "requires_override": True}, status=422)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise web.HTTPBadRequest(reason=str(exc)) from exc
+    return _json(result)
+
+
+async def handle_base_stations(request: web.Request) -> web.Response:
+    return _json({"base_stations": await asyncio.to_thread(_metadata(request).list_base_stations)})
+
+
+async def handle_discover_bssids(request: web.Request) -> web.Response:
+    created = await asyncio.to_thread(_quality_service(request).sync_catalog)
+    stations = await asyncio.to_thread(_metadata(request).list_base_stations)
+    return _json({"created": created, "base_stations": stations})
+
+
+async def handle_create_station(request: web.Request) -> web.Response:
+    body = await request.json()
+    try:
+        station = await asyncio.to_thread(
+            _metadata(request).create_station, body.get("name"), body.get("lat"), body.get("lon")
+        )
+    except (TypeError, ValueError) as exc:
+        raise web.HTTPBadRequest(reason=str(exc)) from exc
+    return _json(station, status=201)
+
+
+async def handle_update_station(request: web.Request) -> web.Response:
+    body = await request.json()
+    try:
+        station = await asyncio.to_thread(
+            _metadata(request).update_station, int(request.match_info["station_id"]), body
+        )
+    except KeyError as exc:
+        raise web.HTTPNotFound(reason=str(exc)) from exc
+    except (TypeError, ValueError) as exc:
+        raise web.HTTPBadRequest(reason=str(exc)) from exc
+    return _json(station)
+
+
+async def handle_assign_bssid(request: web.Request) -> web.Response:
+    body = await request.json()
+    try:
+        await asyncio.to_thread(
+            _metadata(request).assign_bssid, body.get("bssid"), int(body.get("station_id"))
+        )
+    except KeyError as exc:
+        raise web.HTTPNotFound(reason=str(exc)) from exc
+    except (TypeError, ValueError) as exc:
+        raise web.HTTPBadRequest(reason=str(exc)) from exc
+    return _json({"ok": True})
+
+
+async def handle_merge_stations(request: web.Request) -> web.Response:
+    body = await request.json()
+    try:
+        await asyncio.to_thread(
+            _metadata(request).merge_stations,
+            int(body.get("source_id")), int(body.get("target_id")),
+        )
+    except KeyError as exc:
+        raise web.HTTPNotFound(reason=str(exc)) from exc
+    except (TypeError, ValueError) as exc:
+        raise web.HTTPBadRequest(reason=str(exc)) from exc
+    return _json({"ok": True})
+
+
+async def handle_profiles(request: web.Request) -> web.Response:
+    return _json({"profiles": await asyncio.to_thread(_metadata(request).list_profiles)})
+
+
+async def handle_save_profile(request: web.Request) -> web.Response:
+    body = await request.json()
+    profile_id = int(request.match_info["profile_id"]) if request.match_info.get("profile_id") else None
+    try:
+        profile = await asyncio.to_thread(_metadata(request).save_profile, body, profile_id)
+    except KeyError as exc:
+        raise web.HTTPNotFound(reason=str(exc)) from exc
+    except (TypeError, ValueError) as exc:
+        raise web.HTTPBadRequest(reason=str(exc)) from exc
+    return _json(profile, status=201 if profile_id is None else 200)
+
+
 # ---------------------------------------------------------------------------
 # Dashboard (HTML)
 # ---------------------------------------------------------------------------
+
+_LOGIN_HTML = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>OATI Telemetry · Sign in</title><style>
+:root{color-scheme:dark}body{margin:0;background:#0b1419;color:#e7ecee;font:14px system-ui;
+display:grid;place-items:center;min-height:100vh}.card{width:min(360px,calc(100% - 32px));
+background:#0f1b21;border:1px solid #2a3d46;border-radius:12px;padding:24px;box-sizing:border-box}
+h1{font-size:18px;color:#3fb6d8}label{display:block;color:#9fb6bd;margin:14px 0 5px}
+input{width:100%;box-sizing:border-box;padding:9px;background:#0b1419;color:#fff;border:1px solid #2a3d46;
+border-radius:6px}button{width:100%;margin-top:18px;padding:9px;border:0;border-radius:6px;
+background:#3fb6d8;color:#071116;font-weight:700;cursor:pointer}.error{color:#e2615a;min-height:20px}
+</style></head><body><form class="card" method="post"><h1>OATI Telemetry</h1>
+<div class="error">__ERROR__</div><label>Username</label><input name="username" autocomplete="username" required>
+<label>Password</label><input name="password" type="password" autocomplete="current-password" required>
+<button type="submit">Sign in</button></form></body></html>"""
+
+
+async def handle_login(request: web.Request) -> web.Response:
+    auth: Optional[AuthManager] = request.app.get("auth")
+    if auth is None or not auth.enabled:
+        raise web.HTTPFound("/viewer")
+    if auth.session(request):
+        raise web.HTTPFound("/viewer")
+    error = ""
+    if request.method == "POST":
+        form = await request.post()
+        result = auth.authenticate(
+            str(form.get("username") or ""),
+            str(form.get("password") or ""),
+            request.remote or "unknown",
+        )
+        if result:
+            token, _csrf = result
+            response = web.HTTPFound("/viewer")
+            auth.set_cookie(response, token)
+            raise response
+        error = "Invalid credentials or too many attempts"
+    return web.Response(content_type="text/html", text=_LOGIN_HTML.replace("__ERROR__", error))
+
+
+async def handle_logout(request: web.Request) -> web.Response:
+    auth: Optional[AuthManager] = request.app.get("auth")
+    if auth is not None:
+        auth.logout(request)
+    response = web.HTTPFound("/login")
+    response.del_cookie("oati_session", path="/")
+    raise response
+
 
 _DASHBOARD_HTML = """\
 <!DOCTYPE html>
@@ -464,6 +663,11 @@ function reltime(iso) {
   if (diff < 86400) return Math.round(diff/3600)+'h ago';
   return new Date(iso).toLocaleDateString();
 }
+function escHTML(value) {
+  return String(value ?? '').replace(/[&<>"']/g, c => ({
+    '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'
+  }[c]));
+}
 
 async function fetchJSON(url) {
   const r = await fetch(url); return r.json();
@@ -491,8 +695,8 @@ async function refresh() {
   } else {
     dtb.innerHTML = devices.map(d => `
       <tr>
-        <td><span class="device-link" onclick="filterDevice('${d.device_id}')">${d.device_id}</span></td>
-        <td>${d.vehicles.map(v=>`<span class="badge">${v}</span>`).join('')}</td>
+        <td><span class="device-link" data-device="${escHTML(d.device_id)}">${escHTML(d.device_id)}</span></td>
+        <td>${d.vehicles.map(v=>`<span class="badge">${escHTML(v)}</span>`).join('')}</td>
         <td>${d.total_segments}</td>
         <td>${fmtBytes(d.total_bytes)}</td>
         <td>${reltime(d.last_seen)}</td>
@@ -508,18 +712,27 @@ async function refresh() {
   } else {
     stb.innerHTML = segments.slice(0, 50).map(s => `
       <tr>
-        <td>${s.device_id}</td>
-        <td><span class="badge">${s.vehicle_short}</span></td>
-        <td style="font-size:12px">${s.segment}</td>
+        <td>${escHTML(s.device_id)}</td>
+        <td><span class="badge">${escHTML(s.vehicle_short)}</span></td>
+        <td style="font-size:12px">${escHTML(s.segment)}</td>
         <td>${fmtBytes(s.bytes_received)}</td>
         <td>${s.files_received ?? s.chunks_received}</td>
         <td>${reltime(s.last_seen)}</td>
-        <td><button onclick="viewSegment('${s.device_id}','${s.vehicle_short}','${s.segment}')"
+        <td><button class="view-segment" data-device="${escHTML(s.device_id)}"
+            data-vehicle="${escHTML(s.vehicle_short)}" data-segment="${escHTML(s.segment)}"
             style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);
                    border-radius:5px;padding:3px 10px;cursor:pointer;font-size:11px;">
             View</button></td>
       </tr>`).join('');
+    stb.querySelectorAll('.view-segment').forEach(button => {
+      button.addEventListener('click', () => viewSegment(
+        button.dataset.device, button.dataset.vehicle, button.dataset.segment
+      ));
+    });
   }
+  dtb.querySelectorAll('.device-link').forEach(link => {
+    link.addEventListener('click', () => filterDevice(link.dataset.device));
+  });
 }
 
 function filterDevice(id) {
@@ -580,12 +793,30 @@ def make_app(
     activity_gap_ms: int = 120_000,
     backfill_data_dir_path: Optional[str] = None,
     backfill_on_startup: bool = False,
+    metadata: Optional[MetadataStore] = None,
+    auth: Optional[AuthManager] = None,
+    max_analysis_days: int = 90,
+    tile_url: str = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+    tile_attribution: str = "© OpenStreetMap contributors",
 ) -> web.Application:
     # aiohttp defaults to 1 MiB; daemon segments can produce larger gzip files.
-    app = web.Application(client_max_size=max(1024 * 1024, int(max_upload_bytes)))
+    middlewares = [auth_middleware(auth)] if auth is not None else []
+    app = web.Application(
+        client_max_size=max(1024 * 1024, int(max_upload_bytes)),
+        middlewares=middlewares,
+    )
     app["storage"] = storage
     app["clickhouse"] = clickhouse
     app["activity_gap_ms"] = int(activity_gap_ms)
+    app["metadata"] = metadata
+    app["auth"] = auth
+    app["max_analysis_days"] = max(1, int(max_analysis_days))
+    app["tile_url"] = tile_url
+    app["tile_attribution"] = tile_attribution
+    app["wifi_quality"] = (
+        WiFiQualityService(clickhouse, metadata, max_days=max_analysis_days)
+        if clickhouse is not None and metadata is not None else None
+    )
     app["start_mono"] = time.monotonic()
     app["backfill_status"] = {
         "state": "idle",
@@ -596,6 +827,9 @@ def make_app(
     }
 
     app.router.add_post("/ingest", handle_ingest)
+    app.router.add_get("/login", handle_login)
+    app.router.add_post("/login", handle_login)
+    app.router.add_post("/logout", handle_logout)
     app.router.add_get("/", handle_dashboard)
     app.router.add_get("/viewer", handle_viewer)
     app.router.add_get("/api/status", handle_status)
@@ -609,6 +843,17 @@ def make_app(
     app.router.add_get("/api/activity", handle_api_activity)
     app.router.add_get("/api/slice", handle_api_slice)
     app.router.add_get("/api/track", handle_api_track)
+    app.router.add_get("/api/app-config", handle_app_config)
+    app.router.add_get("/api/wifi-quality", handle_wifi_quality)
+    app.router.add_get("/api/base-stations", handle_base_stations)
+    app.router.add_post("/api/base-stations", handle_create_station)
+    app.router.add_patch("/api/base-stations/{station_id}", handle_update_station)
+    app.router.add_post("/api/base-stations/discover", handle_discover_bssids)
+    app.router.add_post("/api/base-stations/assign-bssid", handle_assign_bssid)
+    app.router.add_post("/api/base-stations/merge", handle_merge_stations)
+    app.router.add_get("/api/quality-profiles", handle_profiles)
+    app.router.add_post("/api/quality-profiles", handle_save_profile)
+    app.router.add_patch("/api/quality-profiles/{profile_id}", handle_save_profile)
 
     if clickhouse is not None and backfill_on_startup and backfill_data_dir_path:
         async def _start_backfill(app_: web.Application) -> None:
@@ -631,6 +876,9 @@ def make_app(
             async def _job() -> None:
                 try:
                     stats = await asyncio.to_thread(_run)
+                    quality: Optional[WiFiQualityService] = app_.get("wifi_quality")
+                    if quality is not None:
+                        await asyncio.to_thread(quality.sync_catalog)
                     status["state"] = "done"
                     status["stats"] = stats
                     logger.info("Background backfill finished: %s", stats)
@@ -652,8 +900,9 @@ def make_app(
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _json(data: Any) -> web.Response:
+def _json(data: Any, *, status: int = 200) -> web.Response:
     return web.Response(
+        status=status,
         content_type="application/json",
         text=json.dumps(data, ensure_ascii=False, default=str),
     )

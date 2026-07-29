@@ -32,7 +32,19 @@ class TestCollectorConfig(unittest.TestCase):
                     "user": "u",
                     "password": "p",
                 },
-                "viewer": {"activityGapMs": 60000},
+                "viewer": {
+                    "activityGapMs": 60000,
+                    "metadataDb": "/tmp/meta.db",
+                    "maxAnalysisDays": 90,
+                    "tileUrl": "https://tiles/{z}/{x}/{y}.png",
+                },
+                "auth": {
+                    "enabled": True,
+                    "username": "operator",
+                    "passwordHash": "scrypt$example",
+                    "sessionHours": 8,
+                    "secureCookie": True,
+                },
             }
         )
         self.assertEqual(cfg.bind, "127.0.0.1")
@@ -47,6 +59,12 @@ class TestCollectorConfig(unittest.TestCase):
         self.assertEqual(cfg.clickhouse_user, "u")
         self.assertEqual(cfg.clickhouse_password, "p")
         self.assertEqual(cfg.activity_gap_ms, 60000)
+        self.assertEqual(cfg.metadata_db, "/tmp/meta.db")
+        self.assertEqual(cfg.max_analysis_days, 90)
+        self.assertTrue(cfg.auth_enabled)
+        self.assertEqual(cfg.admin_username, "operator")
+        self.assertEqual(cfg.session_hours, 8)
+        self.assertTrue(cfg.secure_cookie)
 
     def test_load_from_file(self):
         with tempfile.TemporaryDirectory() as td:

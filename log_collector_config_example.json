@@ -13,7 +13,18 @@
     "password": "",
     "backfillOnStartup": true
   },
+  "auth": {
+    "enabled": false,
+    "username": "admin",
+    "passwordHash": "",
+    "sessionHours": 12,
+    "secureCookie": false
+  },
   "viewer": {
-    "activityGapMs": 120000
+    "activityGapMs": 120000,
+    "metadataDb": "collector_metadata.sqlite3",
+    "maxAnalysisDays": 90,
+    "tileUrl": "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+    "tileAttribution": "© OpenStreetMap contributors"
   }
 }

@@ -14,12 +14,14 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import getpass
 import logging
 import sys
 
 from aiohttp import web
 
 from .clickhouse_client import ClickHouseConfig, try_create_store
+from .auth import AuthManager, hash_password
 from .clickhouse_ingest import backfill_data_dir
 from .config import (
     DEFAULT_CONFIG_PATH,
@@ -28,6 +30,7 @@ from .config import (
     merge_cli_overrides,
 )
 from .server import make_app
+from .metadata_store import MetadataStore
 from .storage import ChunkStorage
 
 
@@ -86,6 +89,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Deprecated alias: enable ClickHouse + background backfill, then serve",
     )
+    p.add_argument(
+        "--hash-password",
+        action="store_true",
+        help="Prompt for an admin password, print its scrypt hash, then exit",
+    )
     return p
 
 
@@ -93,6 +101,13 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.hash_password:
+        first = getpass.getpass("Admin password: ")
+        second = getpass.getpass("Confirm password: ")
+        if first != second:
+            parser.error("passwords do not match")
+        print(hash_password(first))
+        return 0
     explicit = explicit_cli_dests(argv)
 
     try:
@@ -133,6 +148,17 @@ def main(argv: list[str] | None = None) -> int:
         password=cfg.clickhouse_password,
     )
     ch_store = try_create_store(ch_config)
+    metadata = MetadataStore(cfg.metadata_db)
+    if cfg.auth_enabled and not cfg.admin_password_hash:
+        logging.error("auth.enabled=true requires auth.passwordHash")
+        return 1
+    auth = AuthManager(
+        metadata,
+        username=cfg.admin_username if cfg.auth_enabled else "",
+        password_hash=cfg.admin_password_hash if cfg.auth_enabled else "",
+        session_hours=cfg.session_hours,
+        secure_cookie=cfg.secure_cookie,
+    )
 
     # Synchronous one-shot backfill (no HTTP server).
     if args.backfill and not args.backfill_and_serve:
@@ -158,6 +184,11 @@ def main(argv: list[str] | None = None) -> int:
         activity_gap_ms=cfg.activity_gap_ms,
         backfill_data_dir_path=cfg.data_dir,
         backfill_on_startup=background_backfill,
+        metadata=metadata,
+        auth=auth,
+        max_analysis_days=cfg.max_analysis_days,
+        tile_url=cfg.tile_url,
+        tile_attribution=cfg.tile_attribution,
     )
 
     print(
@@ -169,6 +200,7 @@ def main(argv: list[str] | None = None) -> int:
         f"  Log viewer      : http://{cfg.bind}:{cfg.port}/viewer\n"
         f"  Data directory  : {storage._data_dir}\n"
         f"  ClickHouse      : {'enabled' if ch_store else 'disabled'}\n"
+        f"  Authentication : {'enabled' if auth.enabled else 'disabled'}\n"
         f"  Backfill        : {'background' if background_backfill else 'off'}\n",
         flush=True,
     )

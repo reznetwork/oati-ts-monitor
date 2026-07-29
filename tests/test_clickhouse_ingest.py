@@ -121,6 +121,9 @@ class TestViewerRoutes(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(resp.status, 200)
                 text = await resp.text()
                 self.assertIn("Historical Log Viewer", text)
+                self.assertIn("Historical Replay", text)
+                self.assertIn("Wi-Fi Quality", text)
+                self.assertIn("catalog-drawer", text)
                 self.assertIn("tl-playhead", text)
 
     async def test_api_vehicles_unavailable_without_clickhouse(self):

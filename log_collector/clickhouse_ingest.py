@@ -98,6 +98,7 @@ def _mark_unreadable(
         max_ts_ms=0,
         row_count=0,
     )
+    store.mark_quality_segment_ingested(device_id, vehicle_short, segment, 0)
     logger.warning(
         "Marked unreadable segment as ingested (skip future backfill): %s/%s/%s",
         device_id,
@@ -219,6 +220,84 @@ def parse_segment_records(
     return snapshots, events, min_ts, max_ts
 
 
+def derive_wifi_quality_rows(events: Iterable[list]) -> List[list]:
+    """Flatten Wi-Fi events and derive safe counter rates for analytics.
+
+    Counter deltas are only calculated within a segment, for the same
+    vehicle/BSSID, over gaps of 0.25–30 seconds. Counter resets are ignored.
+    """
+    rows: List[list] = []
+    previous: Dict[Tuple[str, str], Tuple[int, Optional[float], Optional[float]]] = {}
+    for event in events:
+        if len(event) < 11:
+            continue
+        device_id, vehicle, vehicle_short, segment, ts_ms, kind = event[:6]
+        if kind not in ("wifi_sample", "wifi_roaming_event", "roaming_event"):
+            continue
+        try:
+            payload = json.loads(event[6]) if isinstance(event[6], str) else event[6]
+        except (TypeError, json.JSONDecodeError):
+            payload = {}
+        if not isinstance(payload, dict):
+            continue
+        lat, lon, rssi, bssid = event[7], event[8], event[9], event[10]
+        wifi = payload.get("wifi") if isinstance(payload.get("wifi"), dict) else {}
+        roam_count = 0
+        if kind in ("wifi_roaming_event", "roaming_event"):
+            roam_count = 1
+            details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
+            bssid = bssid or details.get("new_bssid") or details.get("old_bssid")
+        if lat is None or lon is None:
+            continue
+        bssid = str(bssid or "").strip().lower()
+        if not bssid:
+            # Keep roaming/coverage events queryable without inventing an AP.
+            bssid = "unknown"
+
+        tx_bytes = _as_float(wifi.get("tx_bytes"))
+        rx_bytes = _as_float(wifi.get("rx_bytes"))
+        tx_traffic = rx_traffic = None
+        key = (str(vehicle_short), bssid)
+        prior = previous.get(key)
+        if prior is not None and not roam_count:
+            prev_ts, prev_tx, prev_rx = prior
+            dt_ms = int(ts_ms) - prev_ts
+            if 250 <= dt_ms <= 30_000:
+                if tx_bytes is not None and prev_tx is not None and tx_bytes >= prev_tx:
+                    tx_traffic = (tx_bytes - prev_tx) * 8.0 / (dt_ms * 1000.0)
+                if rx_bytes is not None and prev_rx is not None and rx_bytes >= prev_rx:
+                    rx_traffic = (rx_bytes - prev_rx) * 8.0 / (dt_ms * 1000.0)
+        if not roam_count:
+            previous[key] = (int(ts_ms), tx_bytes, rx_bytes)
+
+        gateways = payload.get("gateways") if isinstance(payload.get("gateways"), dict) else {}
+        gateway_latencies: List[float] = []
+        gateway_states: List[bool] = []
+        for probe in gateways.values():
+            if not isinstance(probe, dict):
+                continue
+            latency = _as_float(probe.get("latency_ms"))
+            if latency is not None:
+                gateway_latencies.append(latency)
+            status = str(probe.get("status") or "").strip().upper()
+            if status:
+                gateway_states.append(status == "OK")
+
+        rows.append(
+            [
+                str(device_id), str(vehicle), str(vehicle_short), str(segment),
+                int(ts_ms), float(lat), float(lon), bssid,
+                _as_float(rssi), _as_float(wifi.get("signal_avg_dbm")),
+                _as_float(wifi.get("noise_dbm")), _as_float(wifi.get("tx_rate_mbps")),
+                _as_float(wifi.get("rx_rate_mbps")), tx_traffic, rx_traffic,
+                max(gateway_latencies) if gateway_latencies else None,
+                int(all(gateway_states)) if gateway_states else None,
+                _as_float(wifi.get("beacon_loss_count")), roam_count,
+            ]
+        )
+    return rows
+
+
 def ingest_payload_to_clickhouse(
     store: ClickHouseStore,
     *,
@@ -239,7 +318,9 @@ def ingest_payload_to_clickhouse(
     if not payload:
         return {"status": "empty", "snapshots": 0, "events": 0}
 
-    if skip_if_ingested and store.is_segment_ingested(device_id, vehicle_short, segment):
+    original_ingested = store.is_segment_ingested(device_id, vehicle_short, segment)
+    quality_ingested = store.is_quality_segment_ingested(device_id, vehicle_short, segment)
+    if skip_if_ingested and original_ingested and quality_ingested:
         logger.info("Skip already-ingested segment %s/%s/%s", device_id, vehicle_short, segment)
         return {"status": "skipped", "snapshots": 0, "events": 0}
 
@@ -275,25 +356,36 @@ def ingest_payload_to_clickhouse(
         segment=segment,
     )
 
-    for i in range(0, len(snapshots), BATCH_SIZE):
-        store.insert_snapshots(snapshots[i : i + BATCH_SIZE])
-    for i in range(0, len(events), BATCH_SIZE):
-        store.insert_events(events[i : i + BATCH_SIZE])
+    # During an upgrade, original rows may already exist while normalized
+    # analytics do not. Reparse retained files without duplicating originals.
+    if not original_ingested:
+        for i in range(0, len(snapshots), BATCH_SIZE):
+            store.insert_snapshots(snapshots[i : i + BATCH_SIZE])
+        for i in range(0, len(events), BATCH_SIZE):
+            store.insert_events(events[i : i + BATCH_SIZE])
+    quality_rows = derive_wifi_quality_rows(events)
+    for i in range(0, len(quality_rows), BATCH_SIZE):
+        store.insert_wifi_quality_samples(quality_rows[i : i + BATCH_SIZE])
+    store.rebuild_quality_segment_rollup(device_id, vehicle_short, segment)
+    store.mark_quality_segment_ingested(
+        device_id, vehicle_short, segment, len(quality_rows)
+    )
 
     row_count = len(snapshots) + len(events)
     if min_ts is None or max_ts is None:
         min_ts = 0
         max_ts = 0
 
-    store.mark_segment_ingested(
-        device_id=device_id,
-        vehicle=vehicle,
-        vehicle_short=vehicle_short,
-        segment=segment,
-        min_ts_ms=min_ts,
-        max_ts_ms=max_ts,
-        row_count=row_count,
-    )
+    if not original_ingested:
+        store.mark_segment_ingested(
+            device_id=device_id,
+            vehicle=vehicle,
+            vehicle_short=vehicle_short,
+            segment=segment,
+            min_ts_ms=min_ts,
+            max_ts_ms=max_ts,
+            row_count=row_count,
+        )
     logger.info(
         "Ingested %s/%s/%s → %d snapshots, %d events",
         device_id,
@@ -306,6 +398,7 @@ def ingest_payload_to_clickhouse(
         "status": "ok" if row_count else "empty",
         "snapshots": len(snapshots),
         "events": len(events),
+        "wifi_quality_samples": len(quality_rows),
         "min_ts_ms": min_ts,
         "max_ts_ms": max_ts,
     }
@@ -326,13 +419,7 @@ def ingest_file_path(
         payload = path.read_bytes()
     except OSError as exc:
         logger.warning("Cannot read segment %s: %s", path, exc)
-        return _mark_unreadable(
-            store,
-            device_id=device_id,
-            vehicle=vehicle,
-            vehicle_short=vehicle_short,
-            segment=segment,
-        )
+        return {"status": "error", "snapshots": 0, "events": 0, "error": str(exc)}
     try:
         return ingest_payload_to_clickhouse(
             store,
@@ -343,14 +430,8 @@ def ingest_file_path(
             payload=payload,
         )
     except Exception:
-        logger.exception("Unexpected ingest failure for %s; marking as corrupt", path)
-        return _mark_unreadable(
-            store,
-            device_id=device_id,
-            vehicle=vehicle,
-            vehicle_short=vehicle_short,
-            segment=segment,
-        )
+        logger.exception("Unexpected ingest failure for %s; leaving retryable", path)
+        return {"status": "error", "snapshots": 0, "events": 0}
 
 
 def backfill_data_dir(store: ClickHouseStore, data_dir: Union[str, Path]) -> Dict[str, int]:
@@ -380,7 +461,10 @@ def backfill_data_dir(store: ClickHouseStore, data_dir: Union[str, Path]) -> Dic
             continue
         device_id, vehicle_short, segment = parts[0], parts[1], parts[-1]
         try:
-            if store.is_segment_ingested(device_id, vehicle_short, segment):
+            if (
+                store.is_segment_ingested(device_id, vehicle_short, segment)
+                and store.is_quality_segment_ingested(device_id, vehicle_short, segment)
+            ):
                 stats["skipped"] += 1
                 continue
             stats["outstanding"] += 1
@@ -399,17 +483,7 @@ def backfill_data_dir(store: ClickHouseStore, data_dir: Union[str, Path]) -> Dic
                 stats[status] = stats.get(status, 0) + 1
         except Exception:
             logger.exception("Backfill failed for %s", seg_path)
-            try:
-                _mark_unreadable(
-                    store,
-                    device_id=device_id,
-                    vehicle=vehicle_short,
-                    vehicle_short=vehicle_short,
-                    segment=segment,
-                )
-                stats["corrupt"] += 1
-            except Exception:
-                stats["errors"] += 1
+            stats["errors"] += 1
 
     logger.info(
         "Backfill complete: found=%d outstanding=%d ingested=%d skipped=%d "

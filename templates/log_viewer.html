@@ -237,13 +237,63 @@
     border-left: 6px solid transparent; border-right: 6px solid transparent;
     border-top: 8px solid var(--playhead);
   }
+  .mode-switch { display:flex; gap:4px; margin-left:12px; }
+  .mode-btn,.header-btn,.quality-toolbar button,.drawer button {
+    background:var(--surface2); color:var(--secondary); border:1px solid var(--border-strong);
+    border-radius:6px; padding:5px 10px; cursor:pointer; font-size:12px;
+  }
+  .mode-btn.active { color:var(--accent); border-color:var(--accent); background:rgba(63,182,216,.12); }
+  .header-actions { margin-left:auto; display:flex; gap:6px; align-items:center; }
+  .header-actions a { margin-left:0; }
+  .quality-toolbar { display:none; flex-wrap:wrap; gap:8px; padding:8px 10px;
+    background:var(--surface); border-bottom:1px solid var(--border); align-items:end; }
+  .quality-toolbar label { display:flex; flex-direction:column; gap:3px; color:var(--secondary); font-size:11px; }
+  .quality-toolbar input,.quality-toolbar select,.drawer input,.drawer select {
+    background:var(--bg); border:1px solid var(--border-strong); border-radius:5px;
+    color:var(--text); padding:5px 7px; min-width:130px;
+  }
+  .quality-toolbar select[multiple] { height:52px; }
+  .quality-summary { display:none; position:absolute; right:10px; top:10px; z-index:500;
+    min-width:180px; background:rgba(15,27,33,.94); border:1px solid var(--border-strong);
+    border-radius:8px; padding:10px; }
+  .quality-summary strong { color:var(--accent); font-size:22px; }
+  body.quality-mode .main-row { grid-template-columns:1fr; }
+  body.quality-mode #dash-pane,body.quality-mode #split-h,body.quality-mode #split-v,
+  body.quality-mode #timeline-pane,.quality-mode .map-layers { display:none; }
+  body.quality-mode .layout { grid-template-rows:1fr; }
+  body.quality-mode .quality-toolbar { display:flex; }
+  body.quality-mode .quality-summary { display:block; }
+  .drawer-backdrop { display:none; position:fixed; inset:0; z-index:2000; background:rgba(0,0,0,.55); }
+  .drawer-backdrop.open { display:block; }
+  .drawer { position:absolute; right:0; top:0; bottom:0; width:min(760px,95vw); overflow:auto;
+    background:var(--surface); border-left:1px solid var(--border-strong); padding:18px; }
+  .drawer-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; }
+  .drawer-grid { display:grid; grid-template-columns:minmax(220px,1fr) minmax(280px,1.4fr); gap:12px; }
+  .drawer-list { border:1px solid var(--border); border-radius:7px; overflow:auto; max-height:65vh; }
+  .drawer-item { padding:8px; border-bottom:1px solid var(--border); cursor:pointer; }
+  .drawer-item:hover,.drawer-item.active { background:var(--surface2); }
+  .form-row { display:grid; grid-template-columns:110px 1fr; align-items:center; gap:8px; margin:8px 0; }
+  .profile-metrics { width:100%; border-collapse:collapse; margin:10px 0; }
+  .profile-metrics th,.profile-metrics td { border-bottom:1px solid var(--border); padding:6px; text-align:left; }
+  .profile-metrics input[type=number] { min-width:65px; width:80px; }
+  .notice { color:var(--warning); font-size:12px; }
+  @media(max-width:700px){.drawer-grid{grid-template-columns:1fr}.app-header .meta{display:none}}
 </style>
 </head>
 <body>
 <header class="app-header">
-  <h1>Historical Log Viewer</h1>
+  <h1>OATI Telemetry</h1>
+  <div class="mode-switch" role="tablist" aria-label="Application mode">
+    <button class="mode-btn active" id="mode-replay" type="button" role="tab" aria-selected="true">Historical Replay</button>
+    <button class="mode-btn" id="mode-quality" type="button" role="tab" aria-selected="false">Wi-Fi Quality</button>
+  </div>
   <div class="meta" id="header-meta">Loading…</div>
-  <a href="/">Ops dashboard</a>
+  <div class="header-actions">
+    <button class="header-btn" id="open-catalog" type="button">Catalog</button>
+    <button class="header-btn" id="open-profiles" type="button">Score profiles</button>
+    <a href="/">Ops dashboard</a>
+    <button class="header-btn" id="logout" type="button">Logout</button>
+  </div>
 </header>
 
 <div class="layout" id="layout">
@@ -262,6 +312,21 @@
     </section>
     <div class="splitter-h" id="split-h" title="Drag to resize"></div>
     <section class="pane" id="map-pane">
+      <div class="quality-toolbar" id="quality-toolbar">
+        <label>From <input id="quality-from" type="datetime-local"></label>
+        <label>To <input id="quality-to" type="datetime-local"></label>
+        <label>Vehicles <select id="quality-vehicles" multiple></select></label>
+        <label>Base stations <select id="quality-stations" multiple></select></label>
+        <label>Layer <select id="quality-layer">
+          <option value="composite">Composite 0–100</option><option value="rssi">RSSI</option>
+          <option value="latency">Gateway latency</option><option value="rate">Traffic/link rate</option>
+          <option value="beacon_loss">Beacon loss</option><option value="roaming">Roaming</option>
+        </select></label>
+        <label>Profile <select id="quality-profile"></select></label>
+        <label style="flex-direction:row;align-items:center"><input id="quality-hide-low" type="checkbox"> Hide low confidence</label>
+        <button type="button" id="quality-apply">Apply</button>
+        <span class="notice" id="quality-warning"></span>
+      </div>
       <div class="pane-title">
         WiFi map
         <div class="map-layers" title="Map layers">
@@ -272,6 +337,7 @@
       </div>
       <div class="pane-body">
         <div id="map"></div>
+        <div class="quality-summary" id="quality-summary">Apply filters to analyze coverage.</div>
         <div class="map-legend" id="map-legend" aria-hidden="true">
           <h4>RSSI</h4>
           <div class="map-legend-row"><span class="map-legend-swatch" style="background:#22c55e"></span>−40 … −68 dBm</div>
@@ -319,6 +385,50 @@
   </section>
 </div>
 
+<div class="drawer-backdrop" id="catalog-drawer">
+  <section class="drawer" role="dialog" aria-modal="true" aria-label="Base-station catalog">
+    <div class="drawer-head"><h2>Base-station Catalog</h2><button data-close="catalog-drawer">Close</button></div>
+    <div style="display:flex;gap:8px;margin-bottom:10px">
+      <input id="catalog-search" placeholder="Search name or BSSID">
+      <button id="catalog-discover">Discover BSSIDs</button>
+      <button id="catalog-add">Add station</button>
+    </div>
+    <div class="drawer-grid">
+      <div class="drawer-list" id="catalog-list"></div>
+      <form id="catalog-form">
+        <input type="hidden" id="station-id">
+        <input type="hidden" id="station-updated-at">
+        <div class="form-row"><label>Name</label><input id="station-name" required></div>
+        <div class="form-row"><label>Latitude</label><input id="station-lat" type="number" step="any"></div>
+        <div class="form-row"><label>Longitude</label><input id="station-lon" type="number" step="any"></div>
+        <div class="form-row"><label>Coordinate source</label><span id="station-source">—</span></div>
+        <h3>BSSIDs</h3><div id="station-bssids" class="pills"></div>
+        <button type="submit">Save</button>
+        <button type="button" id="station-use-map">Use map center</button>
+        <div class="form-row"><label>Merge into</label><select id="station-merge-target"></select></div>
+        <button type="button" id="station-merge">Merge station</button>
+      </form>
+    </div>
+  </section>
+</div>
+
+<div class="drawer-backdrop" id="profiles-drawer">
+  <section class="drawer" role="dialog" aria-modal="true" aria-label="Quality score profiles">
+    <div class="drawer-head"><h2>Quality Score Profiles</h2><button data-close="profiles-drawer">Close</button></div>
+    <div class="drawer-grid">
+      <div><button id="profile-add">New profile</button><div class="drawer-list" id="profile-list"></div></div>
+      <form id="profile-form">
+        <input type="hidden" id="profile-id">
+        <div class="form-row"><label>Name</label><input id="profile-name" required></div>
+        <table class="profile-metrics"><thead><tr><th>Metric</th><th>On</th><th>Weight</th><th>Poor</th><th>Good</th></tr></thead>
+          <tbody id="profile-metric-rows"></tbody></table>
+        <div id="profile-preview" class="notice">Missing metrics are excluded and available weights are renormalized.</div>
+        <button type="submit">Save profile</button>
+      </form>
+    </div>
+  </section>
+</div>
+
 <script>
 (function () {
   const LS = {
@@ -344,7 +454,14 @@
     map: null,
     pathLayer: null,
     roamLayer: null,
+    qualityLayer: null,
     marker: null,
+    mode: new URLSearchParams(location.search).get('mode') === 'quality' ? 'quality' : 'replay',
+    appConfig: {},
+    baseStations: [],
+    profiles: [],
+    selectedStation: null,
+    requestSeq: { slice: 0, track: 0, quality: 0 },
     layers: { path: true, roam: true, playhead: true },
     playback: { dir: 0, raf: null, lastWall: null, lastFetch: 0 },
   };
@@ -426,8 +543,16 @@
     }
   }
 
-  async function fetchJSON(url) {
-    const r = await fetch(url);
+  async function fetchJSON(url, options = {}) {
+    options.headers = Object.assign({}, options.headers || {});
+    if (state.appConfig.csrf_token && options.method && options.method !== 'GET') {
+      options.headers['X-CSRF-Token'] = state.appConfig.csrf_token;
+    }
+    if (options.body && typeof options.body !== 'string') {
+      options.headers['Content-Type'] = 'application/json';
+      options.body = JSON.stringify(options.body);
+    }
+    const r = await fetch(url, options);
     if (!r.ok) {
       const t = await r.text();
       throw new Error(t || r.statusText);
@@ -494,7 +619,7 @@
   function updateHeader() {
     const sel = state.selected || '—';
     $('header-meta').innerHTML =
-      `Selected: <strong>${sel}</strong> · Playhead: <strong>${fmtTs(state.playheadMs)}</strong>`;
+      `Selected: <strong>${esc(sel)}</strong> · Playhead: <strong>${fmtTs(state.playheadMs)}</strong>`;
   }
 
   function rssiColor(dbm) {
@@ -506,12 +631,13 @@
 
   function initMap() {
     state.map = L.map('map', { zoomControl: true }).setView([55.75, 37.62], 12);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    L.tileLayer(state.appConfig.tile_url || 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
-      attribution: '&copy; OpenStreetMap',
+      attribution: state.appConfig.tile_attribution || '&copy; OpenStreetMap',
     }).addTo(state.map);
     state.pathLayer = L.layerGroup();
     state.roamLayer = L.layerGroup();
+    state.qualityLayer = L.layerGroup();
     if (state.layers.path) state.pathLayer.addTo(state.map);
     if (state.layers.roam) state.roamLayer.addTo(state.map);
     setupMapLayers();
@@ -622,6 +748,7 @@
       const d = Math.abs(s.ts_ms - state.playheadMs);
       if (d < bestDist) { best = s; bestDist = d; }
     }
+    if (bestDist > Math.max(state.activityGapMs, 120000)) return;
     state.marker = L.circleMarker([best.lat, best.lon], {
       radius: 8, color: '#fff', fillColor: '#f59e0b', fillOpacity: 1, weight: 2,
     }).bindTooltip(`playhead ${fmtTs(state.playheadMs)}`).addTo(state.map);
@@ -1068,9 +1195,11 @@
     state.globalFrom = Math.min(...state.vehicles.map(v => v.min_ts_ms));
     state.globalTo = Math.max(...state.vehicles.map(v => v.max_ts_ms));
     if (state.globalTo <= state.globalFrom) state.globalTo = state.globalFrom + 1;
-    state.viewFrom = todayFrom;
-    state.viewTo = todayTo;
-    state.playheadMs = Math.min(Math.max(now, todayFrom), todayTo - 1);
+    const anchor = now >= state.globalFrom && now <= state.globalTo ? now : state.globalTo - 1;
+    const anchorDay = dayBoundsMs(anchor);
+    state.viewFrom = anchorDay.from;
+    state.viewTo = anchorDay.to;
+    state.playheadMs = anchor;
     if (!state.selected) state.selected = state.vehicles[0].vehicle_short;
     updateHeader();
     await refreshActivity();
@@ -1097,11 +1226,17 @@
       renderDashboard();
       return;
     }
+    const requestId = ++state.requestSeq.slice;
+    const selected = state.selected;
+    const playhead = state.playheadMs;
     try {
-      state.slice = await fetchJSON(
+      const result = await fetchJSON(
         `/api/slice?vehicle_short=${encodeURIComponent(state.selected)}&ts_ms=${state.playheadMs}`
       );
+      if (requestId !== state.requestSeq.slice || selected !== state.selected || playhead !== state.playheadMs) return;
+      state.slice = result;
     } catch (e) {
+      if (requestId !== state.requestSeq.slice) return;
       state.slice = null;
       $('dash-body').innerHTML = `<div class="empty-msg">${esc(e.message)}</div>`;
       return;
@@ -1144,12 +1279,17 @@
       return;
     }
     const { from, to } = trackQueryWindow();
+    const requestId = ++state.requestSeq.track;
+    const selected = state.selected;
     try {
-      state.track = await fetchJSON(
+      const result = await fetchJSON(
         `/api/track?vehicle_short=${encodeURIComponent(state.selected)}`
         + `&from_ms=${Math.floor(from)}&to_ms=${Math.ceil(to)}`
       );
+      if (requestId !== state.requestSeq.track || selected !== state.selected) return;
+      state.track = result;
     } catch (e) {
+      if (requestId !== state.requestSeq.track) return;
       state.track = { samples: [], roaming: [] };
     }
     renderTrack();
@@ -1323,6 +1463,280 @@
     labs.addEventListener('scroll', () => { rows.scrollTop = labs.scrollTop; });
   }
 
+  function localInput(ms) {
+    const d = new Date(ms - new Date(ms).getTimezoneOffset() * 60000);
+    return d.toISOString().slice(0, 16);
+  }
+
+  function selectedOptions(id) {
+    return [...$(id).selectedOptions].map(o => o.value).filter(Boolean);
+  }
+
+  function qualityColor(score) {
+    if (score == null) return '#64748b';
+    if (score >= 75) return '#22c55e';
+    if (score >= 50) return '#eab308';
+    if (score >= 25) return '#f97316';
+    return '#ef4444';
+  }
+
+  function setLegend(quality) {
+    $('map-legend').innerHTML = quality
+      ? `<h4>Normalized quality</h4>
+         <div class="map-legend-row"><span class="map-legend-swatch" style="background:#22c55e"></span>75–100 good</div>
+         <div class="map-legend-row"><span class="map-legend-swatch" style="background:#eab308"></span>50–74 fair</div>
+         <div class="map-legend-row"><span class="map-legend-swatch" style="background:#f97316"></span>25–49 poor</div>
+         <div class="map-legend-row"><span class="map-legend-swatch" style="background:#ef4444"></span>0–24 critical</div>`
+      : `<h4>RSSI</h4>
+         <div class="map-legend-row"><span class="map-legend-swatch" style="background:#22c55e"></span>−40 … −68 dBm</div>
+         <div class="map-legend-row"><span class="map-legend-swatch" style="background:#eab308"></span>−68 … −77 dBm</div>
+         <div class="map-legend-row"><span class="map-legend-swatch" style="background:#ef4444"></span>≤ −77 dBm</div>`;
+  }
+
+  function h3ResolutionForZoom(zoom) {
+    return Math.max(4, Math.min(11, Math.round((zoom || 12) / 2 + 4)));
+  }
+
+  async function loadQualityMetadata() {
+    const [stations, profiles] = await Promise.all([
+      fetchJSON('/api/base-stations'), fetchJSON('/api/quality-profiles')
+    ]);
+    state.baseStations = stations.base_stations || [];
+    state.profiles = profiles.profiles || [];
+    $('quality-stations').innerHTML = '<option value="">All stations</option>' +
+      state.baseStations.map(s => `<option value="${s.id}">${esc(s.name)} (${s.bssids.length})</option>`).join('');
+    $('quality-profile').innerHTML = state.profiles.map(p =>
+      `<option value="${p.id}" ${p.is_default ? 'selected' : ''}>${esc(p.name)}</option>`).join('');
+    renderCatalog();
+    renderProfiles();
+  }
+
+  async function loadQuality(allowLarge = false) {
+    const requestId = ++state.requestSeq.quality;
+    const from = new Date($('quality-from').value).getTime();
+    const to = new Date($('quality-to').value).getTime();
+    if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to) {
+      $('quality-warning').textContent = 'Choose a valid period.';
+      return;
+    }
+    const bounds = state.map.getBounds();
+    const params = new URLSearchParams({
+      from_ms: String(from), to_ms: String(to),
+      resolution: String(h3ResolutionForZoom(state.map.getZoom())),
+      bounds: [bounds.getSouth(), bounds.getWest(), bounds.getNorth(), bounds.getEast()].join(','),
+    });
+    const vehicles = selectedOptions('quality-vehicles');
+    const stations = selectedOptions('quality-stations');
+    if (vehicles.length) params.set('vehicles', vehicles.join(','));
+    if (stations.length) params.set('station_ids', stations.join(','));
+    if ($('quality-profile').value) params.set('profile_id', $('quality-profile').value);
+    if (allowLarge) params.set('allow_large_range', '1');
+    $('quality-warning').textContent = 'Loading…';
+    try {
+      const data = await fetchJSON('/api/wifi-quality?' + params);
+      if (requestId !== state.requestSeq.quality || state.mode !== 'quality') return;
+      state.qualityLayer.clearLayers();
+      const selectedLayer = $('quality-layer').value;
+      for (const cell of data.cells || []) {
+        if ($('quality-hide-low').checked && (cell.confidence || 0) < .5) continue;
+        const displayScore = selectedLayer === 'composite'
+          ? cell.score : cell.metrics?.[selectedLayer]?.score;
+        const polygon = L.polygon(cell.boundary, {
+          color: qualityColor(displayScore), fillColor: qualityColor(displayScore),
+          fillOpacity: Math.max(.18, .72 * (cell.confidence || 0)), weight: 1,
+        });
+        const metrics = Object.entries(cell.metrics || {}).map(([k,v]) =>
+          `${esc(k)}: ${v.value == null ? '—' : esc(v.value)} (${v.score == null ? '—' : esc(v.score)})`
+        ).join('<br>');
+        polygon.bindPopup(`<strong>${esc(selectedLayer)} ${displayScore ?? '—'}</strong>
+          <br>Composite ${cell.score ?? '—'}<br>Samples ${cell.sample_count}
+          <br>Vehicles: ${(cell.vehicles || []).map(esc).join(', ') || '—'}
+          <br>BSSIDs: ${(cell.bssids || []).map(esc).join(', ') || '—'}<br>${metrics}`);
+        polygon.addTo(state.qualityLayer);
+      }
+      const s = data.summary || {};
+      $('quality-summary').innerHTML = `<div>Combined score</div><strong>${s.score ?? '—'}</strong>
+        <div>Samples ${Number(s.samples || 0).toLocaleString()}</div>
+        <div>Cells ${s.cells || 0} · Roams ${s.roams || 0}</div>
+        <div>Confidence ${s.confidence || 0}%</div>`;
+      $('quality-warning').textContent = data.warning || (data.cells?.length ? '' : 'No data in this viewport.');
+    } catch (e) {
+      if (requestId !== state.requestSeq.quality) return;
+      if (String(e.message).includes('requires_override')) {
+        $('quality-warning').innerHTML = `Range exceeds ${state.appConfig.max_analysis_days || 90} days.
+          <button type="button" id="quality-override">Run anyway</button>`;
+        $('quality-override').onclick = () => loadQuality(true);
+      } else {
+        $('quality-warning').textContent = e.message;
+      }
+    }
+  }
+
+  function setMode(mode) {
+    state.mode = mode;
+    document.body.classList.toggle('quality-mode', mode === 'quality');
+    $('mode-replay').classList.toggle('active', mode === 'replay');
+    $('mode-quality').classList.toggle('active', mode === 'quality');
+    $('mode-replay').setAttribute('aria-selected', String(mode === 'replay'));
+    $('mode-quality').setAttribute('aria-selected', String(mode === 'quality'));
+    const url = new URL(location.href);
+    if (mode === 'quality') url.searchParams.set('mode', 'quality'); else url.searchParams.delete('mode');
+    history.replaceState(null, '', url);
+    if (mode === 'quality') {
+      setLegend(true);
+      state.map.removeLayer(state.pathLayer);
+      state.map.removeLayer(state.roamLayer);
+      if (state.marker) { state.map.removeLayer(state.marker); state.marker = null; }
+      state.qualityLayer.addTo(state.map);
+      loadQualityMetadata().then(() => loadQuality());
+    } else {
+      setLegend(false);
+      state.map.removeLayer(state.qualityLayer);
+      if (state.layers.path) state.pathLayer.addTo(state.map);
+      if (state.layers.roam) state.roamLayer.addTo(state.map);
+      renderTrack();
+    }
+    invalidateMap();
+  }
+
+  function openDrawer(id) { $(id).classList.add('open'); }
+  function closeDrawer(id) { $(id).classList.remove('open'); }
+
+  function renderCatalog(filter = '') {
+    const needle = filter.toLowerCase();
+    const visible = state.baseStations.filter(s =>
+      s.name.toLowerCase().includes(needle) || s.bssids.some(b => b.bssid.includes(needle)));
+    $('catalog-list').innerHTML = visible.map(s =>
+      `<div class="drawer-item ${state.selectedStation === s.id ? 'active' : ''}" data-station="${s.id}">
+       <strong>${esc(s.name)}</strong><br><span class="detail-label">${s.bssids.map(b=>esc(b.bssid)).join(', ') || 'No BSSIDs'}</span></div>`
+    ).join('') || '<div class="empty-msg">No stations</div>';
+    document.querySelectorAll('[data-station]').forEach(el => el.onclick = () => selectStation(Number(el.dataset.station)));
+    $('station-merge-target').innerHTML = state.baseStations
+      .filter(s => s.id !== state.selectedStation)
+      .map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('');
+  }
+
+  function selectStation(id) {
+    const s = state.baseStations.find(x => x.id === id);
+    if (!s) return;
+    state.selectedStation = id;
+    $('station-id').value = id;
+    $('station-updated-at').value = s.updated_at;
+    $('station-name').value = s.name;
+    $('station-lat').value = s.lat ?? '';
+    $('station-lon').value = s.lon ?? '';
+    $('station-source').textContent = s.coordinate_source || '—';
+    $('station-bssids').innerHTML = s.bssids.map(b => `<span class="pill">${esc(b.bssid)}
+      <select data-assign="${esc(b.bssid)}">${state.baseStations.filter(x=>x.id!==id)
+        .map(x=>`<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select>
+      <button type="button" data-assign-btn="${esc(b.bssid)}">Reassign</button></span>`).join('');
+    document.querySelectorAll('[data-assign-btn]').forEach(btn => btn.onclick = async () => {
+      const bssid = btn.dataset.assignBtn;
+      const target = document.querySelector(`[data-assign="${CSS.escape(bssid)}"]`);
+      if (!target || !target.value) return;
+      await fetchJSON('/api/base-stations/assign-bssid', {
+        method:'POST', body:{bssid,station_id:Number(target.value)}
+      });
+      await loadQualityMetadata(); selectStation(Number(target.value));
+    });
+    renderCatalog($('catalog-search').value);
+  }
+
+  function renderProfiles() {
+    $('profile-list').innerHTML = state.profiles.map(p =>
+      `<div class="drawer-item" data-profile="${p.id}">${esc(p.name)}${p.is_default ? ' · default' : ''}</div>`
+    ).join('');
+    document.querySelectorAll('[data-profile]').forEach(el => el.onclick = () =>
+      selectProfile(Number(el.dataset.profile)));
+    if (state.profiles.length && !$('profile-id').value) selectProfile(state.profiles[0].id);
+  }
+
+  const metricLabels = {rssi:'RSSI (dBm)',latency:'Gateway latency (ms)',rate:'Traffic/link rate (Mbps)',
+    beacon_loss:'Beacon loss',roaming:'Roams / 1000 samples'};
+  function selectProfile(id) {
+    const p = state.profiles.find(x => x.id === id);
+    if (!p) return;
+    $('profile-id').value = p.id;
+    $('profile-name').value = p.name;
+    const metrics = p.definition.metrics || {};
+    $('profile-metric-rows').innerHTML = Object.entries(metricLabels).map(([key,label]) => {
+      const m = metrics[key] || {enabled:true,weight:0,poor:0,good:100};
+      return `<tr data-metric="${key}"><td>${label}</td><td><input class="m-on" type="checkbox" ${m.enabled?'checked':''}></td>
+        <td><input class="m-weight" type="number" min="0" value="${m.weight}"></td>
+        <td><input class="m-poor" type="number" step="any" value="${m.poor}"></td>
+        <td><input class="m-good" type="number" step="any" value="${m.good}"></td></tr>`;
+    }).join('');
+  }
+
+  function setupUnifiedApp() {
+    $('mode-replay').onclick = () => setMode('replay');
+    $('mode-quality').onclick = () => setMode('quality');
+    $('quality-apply').onclick = () => loadQuality();
+    $('quality-layer').onchange = () => loadQuality();
+    $('quality-hide-low').onchange = () => loadQuality();
+    $('open-catalog').onclick = () => { openDrawer('catalog-drawer'); loadQualityMetadata(); };
+    $('open-profiles').onclick = () => { openDrawer('profiles-drawer'); loadQualityMetadata(); };
+    document.querySelectorAll('[data-close]').forEach(b => b.onclick = () => closeDrawer(b.dataset.close));
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape') document.querySelectorAll('.drawer-backdrop.open').forEach(d => closeDrawer(d.id));
+    });
+    $('catalog-search').oninput = e => renderCatalog(e.target.value);
+    $('catalog-discover').onclick = async () => {
+      await fetchJSON('/api/base-stations/discover', {method:'POST'});
+      await loadQualityMetadata();
+    };
+    $('catalog-add').onclick = async () => {
+      const station = await fetchJSON('/api/base-stations', {
+        method:'POST', body:{name:'New base station',lat:null,lon:null}
+      });
+      await loadQualityMetadata(); selectStation(station.id);
+    };
+    $('station-use-map').onclick = () => {
+      const c = state.map.getCenter(); $('station-lat').value = c.lat.toFixed(7); $('station-lon').value = c.lng.toFixed(7);
+    };
+    $('catalog-form').onsubmit = async e => {
+      e.preventDefault();
+      const id = Number($('station-id').value);
+      if (!id) return;
+      const updated = await fetchJSON('/api/base-stations/' + id, {method:'PATCH', body:{
+        name:$('station-name').value,
+        updated_at:Number($('station-updated-at').value),
+        lat:$('station-lat').value === '' ? null : Number($('station-lat').value),
+        lon:$('station-lon').value === '' ? null : Number($('station-lon').value),
+      }});
+      state.baseStations = state.baseStations.map(s => s.id === id ? updated : s); selectStation(id);
+    };
+    $('station-merge').onclick = async () => {
+      const source = Number($('station-id').value), target = Number($('station-merge-target').value);
+      if (!source || !target || !confirm('Merge this station and move all BSSIDs?')) return;
+      await fetchJSON('/api/base-stations/merge', {method:'POST',body:{source_id:source,target_id:target}});
+      state.selectedStation = target; await loadQualityMetadata(); selectStation(target);
+    };
+    $('profile-add').onclick = () => {
+      $('profile-id').value=''; $('profile-name').value='New profile';
+      selectProfile(state.profiles[0]?.id); $('profile-id').value=''; $('profile-name').value='New profile';
+    };
+    $('profile-form').onsubmit = async e => {
+      e.preventDefault();
+      const metrics = {};
+      document.querySelectorAll('#profile-metric-rows tr').forEach(row => {
+        metrics[row.dataset.metric] = {enabled:row.querySelector('.m-on').checked,
+          weight:Number(row.querySelector('.m-weight').value),poor:Number(row.querySelector('.m-poor').value),
+          good:Number(row.querySelector('.m-good').value)};
+      });
+      const id = $('profile-id').value;
+      await fetchJSON('/api/quality-profiles' + (id ? '/' + id : ''), {
+        method:id?'PATCH':'POST',body:{name:$('profile-name').value,metrics,missing:'renormalize'}
+      });
+      await loadQualityMetadata();
+    };
+    $('logout').onclick = () => {
+      fetch('/logout',{method:'POST',headers:{'X-CSRF-Token':state.appConfig.csrf_token || ''}})
+        .then(() => location.href='/login');
+    };
+    state.map.on('moveend', () => { if (state.mode === 'quality') loadQuality(); });
+  }
+
   function setupTabs() {
     document.querySelectorAll('.tab-btn').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -1335,10 +1749,13 @@
   }
 
   async function boot() {
+    try { state.appConfig = await fetchJSON('/api/app-config'); } catch (_) { state.appConfig = {}; }
+    if (!state.appConfig.auth_enabled) $('logout').style.display = 'none';
     loadLayout();
     setupSplitters();
     setupTabs();
     initMap();
+    setupUnifiedApp();
     setupTimelineInteractions();
     setupTransport();
     window.addEventListener('resize', () => {
@@ -1347,6 +1764,12 @@
     });
     try {
       await loadVehicles();
+      $('quality-vehicles').innerHTML = state.vehicles.map(v =>
+        `<option value="${esc(v.vehicle_short)}">${esc(v.vehicle || v.vehicle_short)}</option>`).join('');
+      const end = Date.now(), start = end - (state.appConfig.max_analysis_days || 90) * 86400000;
+      $('quality-from').value = localInput(start);
+      $('quality-to').value = localInput(end);
+      setMode(state.mode);
     } catch (e) {
       $('header-meta').textContent = 'ClickHouse API unavailable: ' + e.message;
       $('dash-body').innerHTML = `<div class="empty-msg">${esc(e.message)}<br>
