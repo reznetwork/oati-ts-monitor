@@ -350,7 +350,10 @@ class ClickHouseStore:
                 beacon_loss_count,roam_count
             )
             SELECT
-                device_id,segment,intDiv(ts_ms,300000)*300000,{h3_expression},
+                device_id,
+                segment,
+                intDiv(ts_ms,300000)*300000 AS bucket_ms,
+                {h3_expression} AS h3_11,
                 vehicle_short,bssid,countIf(roam_count=0),
                 sum(ifNull(rssi_dbm,0.0)),count(rssi_dbm),
                 sum(ifNull(gateway_latency_ms,0.0)),count(gateway_latency_ms),

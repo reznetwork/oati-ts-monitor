@@ -6,6 +6,7 @@ import unittest
 from aiohttp.test_utils import TestClient, TestServer
 
 from log_collector.auth import AuthManager, hash_password, verify_password
+from log_collector.clickhouse_client import ClickHouseConfig, ClickHouseStore
 from log_collector.clickhouse_ingest import derive_wifi_quality_rows
 from log_collector.metadata_store import DEFAULT_PROFILE, MetadataStore
 from log_collector.server import make_app
@@ -14,6 +15,23 @@ from log_collector.wifi_quality import WiFiQualityService, score_cell
 
 
 class TestWifiQualityDerivation(unittest.TestCase):
+    def test_rollup_query_defines_grouping_aliases(self):
+        class Client:
+            def __init__(self):
+                self.sql = ""
+
+            def command(self, sql, parameters=None):
+                self.sql = sql
+
+        client = Client()
+        store = ClickHouseStore.__new__(ClickHouseStore)
+        store.config = ClickHouseConfig(database="logs")
+        store._modern_h3_order = True
+        store._require = lambda: client
+        store.rebuild_quality_segment_rollup("device", "vehicle", "segment")
+        self.assertIn("AS bucket_ms", client.sql)
+        self.assertIn("AS h3_11", client.sql)
+
     def test_counter_rates_and_reset_handling(self):
         def event(ts, tx, rx):
             import json
