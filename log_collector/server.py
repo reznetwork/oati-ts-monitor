@@ -612,6 +612,8 @@ def make_app(
 
     if clickhouse is not None and backfill_on_startup and backfill_data_dir_path:
         async def _start_backfill(app_: web.Application) -> None:
+            # IMPORTANT: do not await the full backfill here — aiohttp waits for
+            # all on_startup handlers before accepting connections.
             status = app_["backfill_status"]
             status["state"] = "running"
             status["started_at"] = datetime.now(timezone.utc).isoformat()
@@ -626,17 +628,20 @@ def make_app(
             def _run() -> dict:
                 return backfill_data_dir(clickhouse, backfill_data_dir_path)
 
-            try:
-                stats = await asyncio.to_thread(_run)
-                status["state"] = "done"
-                status["stats"] = stats
-                logger.info("Background backfill finished: %s", stats)
-            except Exception as exc:
-                status["state"] = "error"
-                status["error"] = str(exc)
-                logger.exception("Background backfill failed")
-            finally:
-                status["finished_at"] = datetime.now(timezone.utc).isoformat()
+            async def _job() -> None:
+                try:
+                    stats = await asyncio.to_thread(_run)
+                    status["state"] = "done"
+                    status["stats"] = stats
+                    logger.info("Background backfill finished: %s", stats)
+                except Exception as exc:
+                    status["state"] = "error"
+                    status["error"] = str(exc)
+                    logger.exception("Background backfill failed")
+                finally:
+                    status["finished_at"] = datetime.now(timezone.utc).isoformat()
+
+            app_["backfill_task"] = asyncio.create_task(_job())
 
         app.on_startup.append(_start_backfill)
 

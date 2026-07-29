@@ -9,7 +9,11 @@ import unittest
 
 from aiohttp.test_utils import TestClient, TestServer
 
-from log_collector.clickhouse_ingest import iter_ndjson_records, parse_segment_records
+from log_collector.clickhouse_ingest import (
+    gunzip_best_effort,
+    iter_ndjson_records,
+    parse_segment_records,
+)
 from log_collector.server import make_app
 from log_collector.storage import ChunkStorage
 
@@ -49,6 +53,21 @@ class TestClickHouseIngestParse(unittest.TestCase):
         recs = list(iter_ndjson_records(payload))
         self.assertEqual(len(recs), 1)
         self.assertEqual(recs[0]["source"]["vehicle"], "Багги Segway")
+
+    def test_truncated_gzip_recovers_partial_data(self):
+        full = _gz_lines(
+            [
+                {"v": 1, "ts_ms": 1, "type": "snapshot", "data": {"n": 1}},
+                {"v": 1, "ts_ms": 2, "type": "snapshot", "data": {"n": 2}},
+            ]
+        )
+        # Chop off the gzip footer / tail so decompress raises EOFError.
+        truncated = full[:-12]
+        raw, was_truncated = gunzip_best_effort(truncated)
+        self.assertTrue(was_truncated)
+        # May recover zero or some bytes depending on where we cut; must not raise.
+        recs = list(iter_ndjson_records(truncated))
+        self.assertIsInstance(recs, list)
 
     def test_parse_snapshot_and_wifi_event(self):
         records = [
