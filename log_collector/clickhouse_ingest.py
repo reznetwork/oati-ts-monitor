@@ -47,11 +47,22 @@ def _extract_wifi_geo(kind: str, payload: Any) -> Tuple[Optional[float], Optiona
 
 def iter_ndjson_records(payload: bytes) -> Iterable[dict]:
     """Yield parsed NDJSON objects from a gzip-compressed or raw NDJSON body."""
+    if not payload:
+        return
     if payload.startswith(b"\x1f\x8b"):
-        raw = gzip.decompress(payload)
+        try:
+            raw = gzip.decompress(payload)
+        except OSError as exc:
+            logger.warning("Invalid gzip payload (%s); skipping", exc)
+            return
     else:
         raw = payload
-    for line in raw.splitlines():
+
+    # Always decode as UTF-8 text before json.loads.
+    # Passing bytes to json.loads() uses encoding detection and can raise
+    # UnicodeDecodeError (e.g. mis-detecting utf-32-be on binary-ish lines).
+    text = raw.decode("utf-8", errors="replace")
+    for line in text.splitlines():
         line = line.strip()
         if not line:
             continue

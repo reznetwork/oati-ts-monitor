@@ -31,6 +31,25 @@ class TestClickHouseIngestParse(unittest.TestCase):
         self.assertEqual(len(recs), 2)
         self.assertEqual(recs[0]["type"], "snapshot")
 
+    def test_iter_ndjson_utf8_cyrillic_and_null_bytes_do_not_raise(self):
+        # Cyrillic vehicle names + a line that would confuse json.loads(bytes) encoding detect.
+        records = [
+            {
+                "v": 1,
+                "ts_ms": 1000,
+                "type": "snapshot",
+                "source": {"vehicle": "Багги Segway", "vehicle_short": "segway_villain"},
+                "data": {"ok": True},
+            }
+        ]
+        raw = "\n".join(json.dumps(r, ensure_ascii=False) for r in records).encode("utf-8")
+        # Inject a null byte mid-stream in a discarded garbage line (corrupt segment edge case)
+        raw = raw + b"\n\x00\x00\x00\x00not-json\n"
+        payload = gzip.compress(raw)
+        recs = list(iter_ndjson_records(payload))
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["source"]["vehicle"], "Багги Segway")
+
     def test_parse_snapshot_and_wifi_event(self):
         records = [
             {
