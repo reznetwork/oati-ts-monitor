@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from dataclasses import dataclass
 from typing import Any, Iterable, List, Optional, Sequence
 
@@ -107,11 +108,20 @@ class ClickHouseConfig:
 
 
 class ClickHouseStore:
-    """Thin wrapper around clickhouse-connect for ingest and viewer queries."""
+    """Thin wrapper around clickhouse-connect for ingest and viewer queries.
+
+    clickhouse-connect forbids concurrent queries on one client session, and
+    aiohttp runs handlers/backfill via thread-pool workers. Each thread therefore
+    gets its own client instance (threading.local).
+    """
 
     def __init__(self, config: ClickHouseConfig) -> None:
         self.config = config
-        self._client = None
+        self._enabled = False
+        self._connect = None
+        self._local = threading.local()
+        self._schema_lock = threading.Lock()
+        self._schema_ready = False
         if not config.enabled:
             return
         try:
@@ -120,40 +130,57 @@ class ClickHouseStore:
             raise ClickHouseUnavailable(
                 "clickhouse-connect is not installed; pip install clickhouse-connect"
             ) from exc
-        self._client = clickhouse_connect.get_client(
-            host=config.host,
-            port=config.port,
-            username=config.username,
-            password=config.password,
-            database="default",
-        )
+        self._connect = clickhouse_connect
+        self._enabled = True
+        # Create schema once on the constructing thread.
         self._ensure_schema()
-        # Prefer the target DB as the client default for unqualified table refs.
-        self._client = clickhouse_connect.get_client(
-            host=config.host,
-            port=config.port,
-            username=config.username,
-            password=config.password,
-            database=config.database,
-        )
 
     @property
     def enabled(self) -> bool:
-        return self._client is not None
+        return self._enabled
+
+    def _new_client(self, *, database: str):
+        assert self._connect is not None
+        return self._connect.get_client(
+            host=self.config.host,
+            port=self.config.port,
+            username=self.config.username,
+            password=self.config.password,
+            database=database,
+        )
+
+    def _thread_client(self):
+        """Return a ClickHouse client bound to the current thread."""
+        if not self._enabled or self._connect is None:
+            raise ClickHouseUnavailable("ClickHouse is not enabled")
+        client = getattr(self._local, "client", None)
+        if client is None:
+            client = self._new_client(database=self.config.database)
+            self._local.client = client
+        return client
 
     def _ensure_schema(self) -> None:
-        assert self._client is not None
-        db = _validate_db_name(self.config.database)
-        # Do not rely on USE — clickhouse-connect HTTP calls are not session-sticky.
-        self._client.command(f"CREATE DATABASE IF NOT EXISTS {db}")
-        for stmt in _ddl_statements(db):
-            self._client.command(stmt.strip())
-        logger.info("ClickHouse schema ready in database %s", db)
+        with self._schema_lock:
+            if self._schema_ready:
+                return
+            db = _validate_db_name(self.config.database)
+            # Bootstrap via default DB, then create qualified tables.
+            bootstrap = self._new_client(database="default")
+            try:
+                bootstrap.command(f"CREATE DATABASE IF NOT EXISTS {db}")
+                for stmt in _ddl_statements(db):
+                    bootstrap.command(stmt.strip())
+            finally:
+                try:
+                    bootstrap.close()
+                except Exception:
+                    pass
+            self._schema_ready = True
+            logger.info("ClickHouse schema ready in database %s", db)
 
     def _require(self):
-        if self._client is None:
-            raise ClickHouseUnavailable("ClickHouse is not enabled")
-        return self._client
+        self._ensure_schema()
+        return self._thread_client()
 
     def is_segment_ingested(self, device_id: str, vehicle_short: str, segment: str) -> bool:
         client = self._require()
@@ -307,7 +334,6 @@ class ClickHouseStore:
                 else:
                     merged.append((start, end, vehicle))
             for start, end, vehicle in merged:
-                # Clip to requested window for client convenience
                 bars.append(
                     {
                         "vehicle_short": vehicle_short,

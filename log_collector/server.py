@@ -32,7 +32,7 @@ from typing import Any, Optional
 from aiohttp import web
 
 from .clickhouse_client import ClickHouseStore, ClickHouseUnavailable
-from .clickhouse_ingest import ingest_payload_to_clickhouse
+from .clickhouse_ingest import backfill_data_dir, ingest_payload_to_clickhouse
 from .storage import ChunkStorage
 from http_header_text import decode_http_header_text
 
@@ -126,6 +126,10 @@ async def handle_status(request: web.Request) -> web.Response:
     stats = await storage.stats()
     stats["uptime_sec"] = round(time.monotonic() - request.app["start_mono"], 1)
     stats["server_time"] = datetime.now(timezone.utc).isoformat()
+    stats["clickhouse_enabled"] = request.app.get("clickhouse") is not None
+    backfill = request.app.get("backfill_status")
+    if isinstance(backfill, dict):
+        stats["backfill"] = dict(backfill)
     return _json(stats)
 
 
@@ -574,6 +578,8 @@ def make_app(
     max_upload_bytes: int = 16 * 1024 * 1024,
     clickhouse: Optional[ClickHouseStore] = None,
     activity_gap_ms: int = 120_000,
+    backfill_data_dir_path: Optional[str] = None,
+    backfill_on_startup: bool = False,
 ) -> web.Application:
     # aiohttp defaults to 1 MiB; daemon segments can produce larger gzip files.
     app = web.Application(client_max_size=max(1024 * 1024, int(max_upload_bytes)))
@@ -581,6 +587,13 @@ def make_app(
     app["clickhouse"] = clickhouse
     app["activity_gap_ms"] = int(activity_gap_ms)
     app["start_mono"] = time.monotonic()
+    app["backfill_status"] = {
+        "state": "idle",
+        "started_at": None,
+        "finished_at": None,
+        "stats": None,
+        "error": None,
+    }
 
     app.router.add_post("/ingest", handle_ingest)
     app.router.add_get("/", handle_dashboard)
@@ -596,6 +609,36 @@ def make_app(
     app.router.add_get("/api/activity", handle_api_activity)
     app.router.add_get("/api/slice", handle_api_slice)
     app.router.add_get("/api/track", handle_api_track)
+
+    if clickhouse is not None and backfill_on_startup and backfill_data_dir_path:
+        async def _start_backfill(app_: web.Application) -> None:
+            status = app_["backfill_status"]
+            status["state"] = "running"
+            status["started_at"] = datetime.now(timezone.utc).isoformat()
+            status["finished_at"] = None
+            status["stats"] = None
+            status["error"] = None
+            logger.info(
+                "Starting ClickHouse backfill in background for %s",
+                backfill_data_dir_path,
+            )
+
+            def _run() -> dict:
+                return backfill_data_dir(clickhouse, backfill_data_dir_path)
+
+            try:
+                stats = await asyncio.to_thread(_run)
+                status["state"] = "done"
+                status["stats"] = stats
+                logger.info("Background backfill finished: %s", stats)
+            except Exception as exc:
+                status["state"] = "error"
+                status["error"] = str(exc)
+                logger.exception("Background backfill failed")
+            finally:
+                status["finished_at"] = datetime.now(timezone.utc).isoformat()
+
+        app.on_startup.append(_start_backfill)
 
     return app
 
