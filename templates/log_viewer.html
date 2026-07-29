@@ -155,14 +155,16 @@
   }
   .tl-label-row:hover { background: var(--surface); }
   .tl-label-row.selected { color: var(--bar-selected); font-weight: 600; background: rgba(110,231,183,.08); }
-  .tl-canvas-wrap { position: relative; overflow: hidden; background: var(--bg); }
+  .tl-canvas-wrap { position: relative; overflow: hidden; background: var(--bg); cursor: grab; }
+  .tl-canvas-wrap.panning { cursor: grabbing; user-select: none; }
   .tl-axis {
     position: absolute; top: 0; left: 0; right: 0; height: 24px;
     border-bottom: 1px solid var(--border); background: var(--surface);
-    pointer-events: none; z-index: 2;
+    pointer-events: none; z-index: 2; overflow: hidden;
   }
   .tl-axis-tick {
-    position: absolute; top: 0; height: 100%; border-left: 1px solid var(--border);
+    position: absolute; top: 0; height: 100%;
+    border-left: 1px solid rgba(255, 255, 255, 0.09);
     font-size: 10px; color: var(--muted); padding: 4px 0 0 4px; white-space: nowrap;
   }
   .tl-grid {
@@ -191,7 +193,7 @@
   .tl-row.selected { background: rgba(110,231,183,.06); }
   .tl-bar {
     position: absolute; top: 6px; height: 16px; border-radius: 3px;
-    background: var(--bar); opacity: .85;
+    background: var(--bar); opacity: .85; cursor: pointer;
   }
   .tl-row.selected .tl-bar { background: var(--bar-selected); }
   .tl-playhead {
@@ -298,12 +300,71 @@
       + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3,'0')}`;
   }
 
-  function fmtAxis(ms, span) {
+  function fmtAxis(ms, stepMs) {
     const d = new Date(ms);
     const p = (n) => String(n).padStart(2, '0');
-    if (span > 3 * 86400000) return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`;
-    if (span > 6 * 3600000) return `${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:00`;
-    return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    if (stepMs >= 86400000) {
+      return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+    }
+    if (stepMs >= 3600000) {
+      return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:00`;
+    }
+    return `${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+
+  function axisStepMs(span, width) {
+    const target = Math.max(4, Math.min(12, Math.floor(width / 110)));
+    const candidates = [
+      60000, 5 * 60000, 15 * 60000, 30 * 60000,
+      3600000, 2 * 3600000, 3 * 3600000, 6 * 3600000, 12 * 3600000,
+      86400000, 7 * 86400000,
+    ];
+    let best = candidates[candidates.length - 1];
+    for (const c of candidates) {
+      if (span / c <= target + 1) {
+        best = c;
+        break;
+      }
+    }
+    return best;
+  }
+
+  function alignTickStart(ms, stepMs) {
+    const d = new Date(ms);
+    if (stepMs >= 7 * 86400000) {
+      d.setHours(0, 0, 0, 0);
+      d.setDate(d.getDate() - d.getDay());
+      return d.getTime();
+    }
+    if (stepMs >= 86400000) {
+      d.setHours(0, 0, 0, 0);
+      return d.getTime();
+    }
+    if (stepMs >= 3600000) {
+      d.setMinutes(0, 0, 0);
+      const hours = stepMs / 3600000;
+      d.setHours(Math.floor(d.getHours() / hours) * hours);
+      return d.getTime();
+    }
+    d.setSeconds(0, 0);
+    const mins = stepMs / 60000;
+    d.setMinutes(Math.floor(d.getMinutes() / mins) * mins);
+    return d.getTime();
+  }
+
+  function eachAxisTick(viewFrom, viewTo, width, fn) {
+    const span = viewTo - viewFrom;
+    if (span <= 0) return;
+    const step = axisStepMs(span, width);
+    let t = alignTickStart(viewFrom, step);
+    while (t + step <= viewFrom) t += step;
+    const maxTicks = 48;
+    let n = 0;
+    while (t <= viewTo + 1 && n < maxTicks) {
+      fn(t, step);
+      t += step;
+      n += 1;
+    }
   }
 
   async function fetchJSON(url) {
@@ -601,7 +662,7 @@
         if (x >= -1 && x <= width + 1) {
           const div = document.createElement('div');
           div.className = 'tl-day-div';
-          div.style.left = Math.round(x) + 'px';
+          div.style.left = x + 'px';
           grid.appendChild(div);
         }
       }
@@ -652,32 +713,20 @@
         el.style.left = clippedLeft + 'px';
         el.style.width = barW + 'px';
         el.title = `${vs}\n${fmtTs(bar.raw_from_ms || bar.from_ms)} → ${fmtTs(bar.raw_to_ms || bar.to_ms)}`;
-        el.addEventListener('click', (e) => {
-          e.stopPropagation();
-          selectVehicle(vs);
-          const mid = (bar.from_ms + bar.to_ms) / 2;
-          setPlayhead(mid, true);
-        });
         row.appendChild(el);
       }
-      row.addEventListener('click', (e) => {
-        selectVehicle(vs);
-        const rect = wrap.getBoundingClientRect();
-        setPlayhead(xToMs(e.clientX - rect.left, width), true);
-      });
       rowsEl.appendChild(row);
     }
 
-    const span = state.viewTo - state.viewFrom;
-    const tickCount = Math.max(4, Math.min(12, Math.floor(width / 110)));
-    for (let i = 0; i <= tickCount; i++) {
-      const ms = state.viewFrom + (span * i) / tickCount;
+    eachAxisTick(state.viewFrom, state.viewTo, width, (ms, step) => {
+      const x = msToX(ms, width);
+      if (x < -2 || x > width + 2) return;
       const tick = document.createElement('div');
       tick.className = 'tl-axis-tick';
-      tick.style.left = msToX(ms, width) + 'px';
-      tick.textContent = fmtAxis(ms, span);
+      tick.style.left = x + 'px';
+      tick.textContent = fmtAxis(ms, step);
       axis.appendChild(tick);
-    }
+    });
 
     $('tl-range').textContent =
       `${fmtTs(state.viewFrom)}  …  ${fmtTs(state.viewTo)}`;
@@ -726,22 +775,27 @@
     const data = await fetchJSON('/api/vehicles');
     state.vehicles = data.vehicles || [];
     state.vehicleOrder = state.vehicles.map(v => v.vehicle_short);
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const todayFrom = todayStart.getTime();
+    const todayTo = todayFrom + 86400000;
+    const now = Date.now();
     if (!state.vehicles.length) {
       $('header-meta').textContent = 'No ingested logs in ClickHouse yet';
-      state.viewFrom = Date.now() - 3600000;
-      state.viewTo = Date.now();
-      state.globalFrom = state.viewFrom;
-      state.globalTo = state.viewTo;
-      state.playheadMs = state.viewFrom;
+      state.viewFrom = todayFrom;
+      state.viewTo = todayTo;
+      state.globalFrom = todayFrom;
+      state.globalTo = todayTo;
+      state.playheadMs = now;
       renderTimeline();
       return;
     }
     state.globalFrom = Math.min(...state.vehicles.map(v => v.min_ts_ms));
     state.globalTo = Math.max(...state.vehicles.map(v => v.max_ts_ms));
     if (state.globalTo <= state.globalFrom) state.globalTo = state.globalFrom + 1;
-    state.viewFrom = state.globalFrom;
-    state.viewTo = state.globalTo;
-    state.playheadMs = state.globalFrom;
+    state.viewFrom = todayFrom;
+    state.viewTo = todayTo;
+    state.playheadMs = Math.min(Math.max(now, todayFrom), todayTo - 1);
     if (!state.selected) state.selected = state.vehicles[0].vehicle_short;
     updateHeader();
     await refreshActivity();
@@ -869,27 +923,38 @@
 
   function setupTimelineInteractions() {
     const wrap = $('tl-canvas-wrap');
-    let dragging = false;
-    let panning = false;
+    let mode = null; // null | 'pending' | 'pan'
+    let startX = 0;
     let lastX = 0;
+    let clickMs = null;
+    let clickVehicle = null;
+    const DRAG_THRESH = 5;
+
+    function vehicleFromEvent(e) {
+      const row = e.target.closest && e.target.closest('.tl-row');
+      return row ? row.dataset.vehicle : null;
+    }
 
     wrap.addEventListener('mousedown', (e) => {
-      if (e.button !== 0) return;
-      if (e.shiftKey || e.altKey) {
-        panning = true;
-        lastX = e.clientX;
-      } else {
-        dragging = true;
-        const rect = wrap.getBoundingClientRect();
-        setPlayhead(xToMs(e.clientX - rect.left, rect.width), false);
-      }
+      if (e.button !== 0 && e.button !== 1) return;
+      if (e.button === 1) e.preventDefault();
+      const rect = wrap.getBoundingClientRect();
+      mode = e.button === 1 ? 'pan' : 'pending';
+      startX = e.clientX;
+      lastX = e.clientX;
+      clickMs = xToMs(e.clientX - rect.left, rect.width);
+      clickVehicle = vehicleFromEvent(e);
+      if (mode === 'pan') wrap.classList.add('panning');
     });
+
     document.addEventListener('mousemove', (e) => {
-      if (dragging) {
-        const rect = wrap.getBoundingClientRect();
-        setPlayhead(xToMs(e.clientX - rect.left, rect.width), false);
-      } else if (panning) {
-        const rect = wrap.getBoundingClientRect();
+      if (!mode) return;
+      const rect = wrap.getBoundingClientRect();
+      if (mode === 'pending' && Math.abs(e.clientX - startX) >= DRAG_THRESH) {
+        mode = 'pan';
+        wrap.classList.add('panning');
+      }
+      if (mode === 'pan') {
         const dx = e.clientX - lastX;
         lastX = e.clientX;
         const span = state.viewTo - state.viewFrom;
@@ -899,15 +964,25 @@
         renderTimeline();
       }
     });
-    document.addEventListener('mouseup', () => {
-      if (dragging) {
-        dragging = false;
-        if (state.selected) Promise.all([loadSlice(), loadTrack()]);
-        else loadSlice();
-      }
-      if (panning) {
-        panning = false;
-        refreshActivity().then(() => loadTrack());
+
+    document.addEventListener('mouseup', async () => {
+      if (!mode) return;
+      const wasPan = mode === 'pan';
+      const wasClick = mode === 'pending';
+      const vs = clickVehicle;
+      const ms = clickMs;
+      mode = null;
+      wrap.classList.remove('panning');
+      if (wasClick) {
+        if (vs) state.selected = vs;
+        state.playheadMs = Math.round(ms);
+        updateHeader();
+        renderTimeline();
+        if (state.selected) await Promise.all([loadSlice(), loadTrack()]);
+        else await loadSlice();
+      } else if (wasPan) {
+        await refreshActivity();
+        await loadTrack();
       }
     });
 
@@ -917,14 +992,6 @@
       const center = xToMs(e.clientX - rect.left, rect.width);
       zoom(e.deltaY < 0 ? 1.25 : 0.8, center);
     }, { passive: false });
-
-    wrap.addEventListener('mousedown', (e) => {
-      if (e.button === 1) {
-        e.preventDefault();
-        panning = true;
-        lastX = e.clientX;
-      }
-    });
 
     $('btn-zoom-in').onclick = () => zoom(1.4, state.playheadMs);
     $('btn-zoom-out').onclick = () => zoom(0.7, state.playheadMs);
