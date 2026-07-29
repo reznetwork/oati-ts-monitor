@@ -61,8 +61,40 @@
     background: var(--surface); display: flex; align-items: center; gap: 8px;
   }
   .pane-body { flex: 1; min-height: 0; overflow: auto; padding: 12px; }
-  #map-pane .pane-body { padding: 0; }
+  #map-pane .pane-body { padding: 0; position: relative; }
   #map { width: 100%; height: 100%; background: #0a1216; }
+  .map-layers {
+    display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto;
+    text-transform: none; letter-spacing: 0; font-size: 11px; color: var(--secondary);
+  }
+  .map-layers label {
+    display: inline-flex; align-items: center; gap: 4px; cursor: pointer;
+    user-select: none;
+  }
+  .map-layers input { accent-color: var(--accent); }
+  .map-legend {
+    position: absolute; left: 10px; bottom: 10px; z-index: 500;
+    background: rgba(15, 27, 33, 0.92); border: 1px solid var(--border-strong);
+    border-radius: 8px; padding: 8px 10px; font-size: 11px; color: var(--text);
+    pointer-events: none; min-width: 148px;
+  }
+  .map-legend h4 {
+    font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--muted); margin-bottom: 6px; font-weight: 600;
+  }
+  .map-legend-row {
+    display: flex; align-items: center; gap: 8px; padding: 2px 0; color: var(--secondary);
+  }
+  .map-legend-swatch {
+    width: 18px; height: 4px; border-radius: 2px; flex: 0 0 auto;
+  }
+  .tl-transport {
+    display: inline-flex; align-items: center; gap: 4px;
+    margin-left: 8px; padding-left: 8px; border-left: 1px solid var(--border);
+  }
+  .tl-transport button.active {
+    border-color: var(--accent); color: var(--accent); background: rgba(63,182,216,.12);
+  }
 
   .splitter-h, .splitter-v {
     background: var(--splitter); position: relative; z-index: 5;
@@ -230,8 +262,23 @@
     </section>
     <div class="splitter-h" id="split-h" title="Drag to resize"></div>
     <section class="pane" id="map-pane">
-      <div class="pane-title">WiFi map</div>
-      <div class="pane-body"><div id="map"></div></div>
+      <div class="pane-title">
+        WiFi map
+        <div class="map-layers" title="Map layers">
+          <label><input type="checkbox" id="layer-path" checked> Path</label>
+          <label><input type="checkbox" id="layer-roam" checked> Roaming</label>
+          <label><input type="checkbox" id="layer-playhead" checked> Playhead</label>
+        </div>
+      </div>
+      <div class="pane-body">
+        <div id="map"></div>
+        <div class="map-legend" id="map-legend" aria-hidden="true">
+          <h4>RSSI</h4>
+          <div class="map-legend-row"><span class="map-legend-swatch" style="background:#22c55e"></span>−40 … −68 dBm</div>
+          <div class="map-legend-row"><span class="map-legend-swatch" style="background:#eab308"></span>−68 … −77 dBm</div>
+          <div class="map-legend-row"><span class="map-legend-swatch" style="background:#ef4444"></span>≤ −77 dBm</div>
+        </div>
+      </div>
     </section>
   </div>
   <div class="splitter-v" id="split-v" title="Drag to resize"></div>
@@ -245,6 +292,15 @@
         <span>Date</span>
         <input type="date" id="tl-date">
       </label>
+      <div class="tl-transport" role="group" aria-label="Playhead controls">
+        <button type="button" id="btn-prev-bar" title="Previous bar">I&lt;</button>
+        <button type="button" id="btn-rev" title="Reverse play">&lt;</button>
+        <button type="button" id="btn-prev-ev" title="Previous event">&lt;I</button>
+        <button type="button" id="btn-pause" title="Pause">II</button>
+        <button type="button" id="btn-next-ev" title="Next event">I&gt;</button>
+        <button type="button" id="btn-play" title="Play">&gt;</button>
+        <button type="button" id="btn-next-bar" title="Next bar">&gt;I</button>
+      </div>
       <span class="range" id="tl-range">—</span>
     </div>
     <div class="tl-body">
@@ -280,6 +336,7 @@
     globalFrom: null,
     globalTo: null,
     bars: [],
+    activityGapMs: 120000,
     vehicleOrder: [],
     slice: null,
     track: null,
@@ -288,6 +345,8 @@
     pathLayer: null,
     roamLayer: null,
     marker: null,
+    layers: { path: true, roam: true, playhead: true },
+    playback: { dir: 0, raf: null, lastWall: null, lastFetch: 0 },
   };
 
   function $(id) { return document.getElementById(id); }
@@ -439,11 +498,10 @@
   }
 
   function rssiColor(dbm) {
-    if (dbm == null) return '#64748b';
-    const t = Math.max(0, Math.min(1, (dbm + 90) / 50));
-    const r = Math.round(255 * (1 - t));
-    const g = Math.round(180 * t + 40);
-    return `rgb(${r},${g},80)`;
+    if (dbm == null || !Number.isFinite(dbm)) return '#64748b';
+    if (dbm >= -68) return '#22c55e';
+    if (dbm >= -77) return '#eab308';
+    return '#ef4444';
   }
 
   function initMap() {
@@ -452,12 +510,74 @@
       maxZoom: 19,
       attribution: '&copy; OpenStreetMap',
     }).addTo(state.map);
-    state.pathLayer = L.layerGroup().addTo(state.map);
-    state.roamLayer = L.layerGroup().addTo(state.map);
+    state.pathLayer = L.layerGroup();
+    state.roamLayer = L.layerGroup();
+    if (state.layers.path) state.pathLayer.addTo(state.map);
+    if (state.layers.roam) state.roamLayer.addTo(state.map);
+    setupMapLayers();
+  }
+
+  function setupMapLayers() {
+    const path = $('layer-path');
+    const roam = $('layer-roam');
+    const playhead = $('layer-playhead');
+    if (!path || !roam || !playhead) return;
+    path.checked = state.layers.path;
+    roam.checked = state.layers.roam;
+    playhead.checked = state.layers.playhead;
+    path.addEventListener('change', () => {
+      state.layers.path = path.checked;
+      if (path.checked) state.pathLayer.addTo(state.map);
+      else state.map.removeLayer(state.pathLayer);
+      const legend = $('map-legend');
+      if (legend) legend.style.display = path.checked ? '' : 'none';
+    });
+    roam.addEventListener('change', () => {
+      state.layers.roam = roam.checked;
+      if (roam.checked) state.roamLayer.addTo(state.map);
+      else state.map.removeLayer(state.roamLayer);
+    });
+    playhead.addEventListener('change', () => {
+      state.layers.playhead = playhead.checked;
+      updatePlayheadMarker();
+    });
   }
 
   function invalidateMap() {
     if (state.map) setTimeout(() => state.map.invalidateSize(), 50);
+  }
+
+  function selectedBars() {
+    if (!state.selected) return [];
+    return state.bars
+      .filter(b => b.vehicle_short === state.selected)
+      .map(b => ({
+        from: b.raw_from_ms != null ? b.raw_from_ms : b.from_ms,
+        to: b.raw_to_ms != null ? b.raw_to_ms : b.to_ms,
+      }))
+      .filter(b => Number.isFinite(b.from) && Number.isFinite(b.to) && b.to >= b.from)
+      .sort((a, b) => a.from - b.from);
+  }
+
+  function barContaining(ms) {
+    const bars = selectedBars();
+    for (const b of bars) {
+      if (ms >= b.from && ms <= b.to) return b;
+    }
+    return null;
+  }
+
+  function samplesShareBar(aTs, bTs) {
+    const bars = selectedBars();
+    if (bars.length) {
+      for (const bar of bars) {
+        if (aTs >= bar.from && aTs <= bar.to && bTs >= bar.from && bTs <= bar.to) {
+          return true;
+        }
+      }
+      return false;
+    }
+    return Math.abs(bTs - aTs) <= state.activityGapMs;
   }
 
   function renderTrack() {
@@ -467,11 +587,13 @@
     const samples = (state.track && state.track.samples) || [];
     const roaming = (state.track && state.track.roaming) || [];
     if (!samples.length) {
+      updatePlayheadMarker();
       invalidateMap();
       return;
     }
     for (let i = 1; i < samples.length; i++) {
       const a = samples[i - 1], b = samples[i];
+      if (!samplesShareBar(a.ts_ms, b.ts_ms)) continue;
       L.polyline([[a.lat, a.lon], [b.lat, b.lon]], {
         color: rssiColor(a.rssi_dbm), weight: 4, opacity: 0.9,
       }).addTo(state.pathLayer);
@@ -488,6 +610,11 @@
   }
 
   function updatePlayheadMarker() {
+    if (state.marker) {
+      state.map.removeLayer(state.marker);
+      state.marker = null;
+    }
+    if (!state.layers.playhead) return;
     if (!state.map || !state.track || !state.track.samples.length || state.playheadMs == null) return;
     let best = state.track.samples[0];
     let bestDist = Math.abs(best.ts_ms - state.playheadMs);
@@ -495,10 +622,164 @@
       const d = Math.abs(s.ts_ms - state.playheadMs);
       if (d < bestDist) { best = s; bestDist = d; }
     }
-    if (state.marker) state.map.removeLayer(state.marker);
     state.marker = L.circleMarker([best.lat, best.lon], {
       radius: 8, color: '#fff', fillColor: '#f59e0b', fillOpacity: 1, weight: 2,
     }).bindTooltip(`playhead ${fmtTs(state.playheadMs)}`).addTo(state.map);
+  }
+
+  function trackEvents() {
+    const samples = (state.track && state.track.samples) || [];
+    const roaming = (state.track && state.track.roaming) || [];
+    const bar = state.playheadMs != null ? barContaining(state.playheadMs) : null;
+    const events = [];
+    for (const s of samples) {
+      if (bar && (s.ts_ms < bar.from || s.ts_ms > bar.to)) continue;
+      events.push({ ts_ms: s.ts_ms, kind: 'sample' });
+    }
+    for (const r of roaming) {
+      if (bar && (r.ts_ms < bar.from || r.ts_ms > bar.to)) continue;
+      events.push({ ts_ms: r.ts_ms, kind: 'roam' });
+    }
+    events.sort((a, b) => a.ts_ms - b.ts_ms);
+    return events;
+  }
+
+  function updateTransportButtons() {
+    const dir = state.playback.dir;
+    const play = $('btn-play');
+    const rev = $('btn-rev');
+    if (play) play.classList.toggle('active', dir > 0);
+    if (rev) rev.classList.toggle('active', dir < 0);
+  }
+
+  function stopPlayback() {
+    state.playback.dir = 0;
+    state.playback.lastWall = null;
+    if (state.playback.raf != null) {
+      cancelAnimationFrame(state.playback.raf);
+      state.playback.raf = null;
+    }
+    updateTransportButtons();
+  }
+
+  async function setPlayheadMs(ms, { fetchSlice = true, reloadTrack = false } = {}) {
+    state.playheadMs = Math.round(ms);
+    updateHeader();
+    positionPlayhead();
+    updatePlayheadMarker();
+    const jobs = [];
+    if (reloadTrack) jobs.push(loadTrack());
+    if (fetchSlice) jobs.push(loadSlice());
+    if (jobs.length) await Promise.all(jobs);
+  }
+
+  function startPlayback(dir) {
+    if (!state.selected || state.playheadMs == null) return;
+    stopPlayback();
+    state.playback.dir = dir;
+    state.playback.lastWall = null;
+    state.playback.lastFetch = 0;
+    updateTransportButtons();
+    const tick = (now) => {
+      if (!state.playback.dir) return;
+      if (state.playback.lastWall == null) state.playback.lastWall = now;
+      const dt = now - state.playback.lastWall;
+      state.playback.lastWall = now;
+      let next = state.playheadMs + state.playback.dir * dt;
+      const bar = barContaining(state.playheadMs) || barContaining(next);
+      if (bar) {
+        if (next > bar.to) {
+          next = bar.to;
+          state.playheadMs = Math.round(next);
+          updateHeader();
+          positionPlayhead();
+          updatePlayheadMarker();
+          stopPlayback();
+          loadSlice();
+          return;
+        }
+        if (next < bar.from) {
+          next = bar.from;
+          state.playheadMs = Math.round(next);
+          updateHeader();
+          positionPlayhead();
+          updatePlayheadMarker();
+          stopPlayback();
+          loadSlice();
+          return;
+        }
+      }
+      state.playheadMs = Math.round(next);
+      updateHeader();
+      positionPlayhead();
+      updatePlayheadMarker();
+      if (now - state.playback.lastFetch > 250) {
+        state.playback.lastFetch = now;
+        loadSlice();
+      }
+      state.playback.raf = requestAnimationFrame(tick);
+    };
+    state.playback.raf = requestAnimationFrame(tick);
+  }
+
+  async function jumpPrevNextEvent(dir) {
+    stopPlayback();
+    const events = trackEvents();
+    if (!events.length || state.playheadMs == null) return;
+    let target = null;
+    if (dir > 0) {
+      for (const e of events) {
+        if (e.ts_ms > state.playheadMs) { target = e.ts_ms; break; }
+      }
+    } else {
+      for (let i = events.length - 1; i >= 0; i--) {
+        if (events[i].ts_ms < state.playheadMs) { target = events[i].ts_ms; break; }
+      }
+    }
+    if (target == null) return;
+    await setPlayheadMs(target, { fetchSlice: true });
+  }
+
+  async function jumpPrevNextBar(dir) {
+    stopPlayback();
+    const bars = selectedBars();
+    if (!bars.length || state.playheadMs == null) return;
+    let idx = bars.findIndex(b => state.playheadMs >= b.from && state.playheadMs <= b.to);
+    let target;
+    if (idx >= 0) {
+      const nextIdx = idx + dir;
+      if (nextIdx < 0 || nextIdx >= bars.length) return;
+      target = bars[nextIdx];
+    } else if (dir > 0) {
+      target = bars.find(b => b.from > state.playheadMs);
+      if (!target) return;
+    } else {
+      for (let i = bars.length - 1; i >= 0; i--) {
+        if (bars[i].to < state.playheadMs) { target = bars[i]; break; }
+      }
+      if (!target) return;
+    }
+    const mid = target.from + (target.to - target.from) / 2;
+    if (state.viewFrom != null && (mid < state.viewFrom || mid > state.viewTo)) {
+      const span = Math.max(1000, state.viewTo - state.viewFrom);
+      state.viewFrom = mid - span / 2;
+      state.viewTo = mid + span / 2;
+      await refreshActivity();
+    }
+    await setPlayheadMs(mid, { fetchSlice: true, reloadTrack: true });
+  }
+
+  function setupTransport() {
+    $('btn-prev-bar').onclick = () => jumpPrevNextBar(-1);
+    $('btn-next-bar').onclick = () => jumpPrevNextBar(1);
+    $('btn-prev-ev').onclick = () => jumpPrevNextEvent(-1);
+    $('btn-next-ev').onclick = () => jumpPrevNextEvent(1);
+    $('btn-play').onclick = () => startPlayback(1);
+    $('btn-rev').onclick = () => startPlayback(-1);
+    $('btn-pause').onclick = () => {
+      stopPlayback();
+      if (state.selected) loadSlice();
+    };
   }
 
   function esc(s) {
@@ -748,6 +1029,7 @@
   }
 
   async function selectVehicle(vs) {
+    stopPlayback();
     if (state.selected !== vs) {
       state.selected = vs;
       updateHeader();
@@ -760,15 +1042,8 @@
   }
 
   async function setPlayhead(ms, fetchData) {
-    state.playheadMs = Math.round(ms);
-    updateHeader();
-    positionPlayhead();
-    updatePlayheadMarker();
-    if (fetchData && state.selected) {
-      await Promise.all([loadSlice(), loadTrack()]);
-    } else if (fetchData) {
-      await loadSlice();
-    }
+    stopPlayback();
+    await setPlayheadMs(ms, { fetchSlice: !!fetchData, reloadTrack: false });
   }
 
   async function loadVehicles() {
@@ -809,6 +1084,7 @@
       `/api/activity?from_ms=${Math.floor(state.viewFrom - pad)}&to_ms=${Math.ceil(state.viewTo + pad)}`
     );
     state.bars = data.bars || [];
+    if (Number.isFinite(data.gap_ms)) state.activityGapMs = data.gap_ms;
     const fromBars = new Set(state.bars.map(b => b.vehicle_short));
     for (const v of state.vehicles) fromBars.add(v.vehicle_short);
     if (!state.vehicleOrder.length) state.vehicleOrder = [...fromBars].sort();
@@ -833,16 +1109,45 @@
     renderDashboard();
   }
 
+  function dayBoundsMs(ms) {
+    const d = new Date(ms);
+    d.setHours(0, 0, 0, 0);
+    const from = d.getTime();
+    return { from, to: from + 86400000 };
+  }
+
+  function trackQueryWindow() {
+    const anchor = state.playheadMs != null
+      ? state.playheadMs
+      : (state.viewFrom != null && state.viewTo != null
+        ? (state.viewFrom + state.viewTo) / 2
+        : Date.now());
+    const day = dayBoundsMs(anchor);
+    let from = day.from;
+    let to = day.to;
+    // When zoomed into part of the day, only fetch the visible slice.
+    if (state.viewFrom != null && state.viewTo != null) {
+      const clippedFrom = Math.max(from, state.viewFrom);
+      const clippedTo = Math.min(to, state.viewTo);
+      if (clippedTo > clippedFrom) {
+        from = clippedFrom;
+        to = clippedTo;
+      }
+    }
+    return { from, to };
+  }
+
   async function loadTrack() {
     if (!state.selected || state.viewFrom == null) {
       state.track = { samples: [], roaming: [] };
       renderTrack();
       return;
     }
+    const { from, to } = trackQueryWindow();
     try {
       state.track = await fetchJSON(
         `/api/track?vehicle_short=${encodeURIComponent(state.selected)}`
-        + `&from_ms=${Math.floor(state.viewFrom)}&to_ms=${Math.ceil(state.viewTo)}`
+        + `&from_ms=${Math.floor(from)}&to_ms=${Math.ceil(to)}`
       );
     } catch (e) {
       state.track = { samples: [], roaming: [] };
@@ -906,6 +1211,7 @@
 
   function jumpToDate(dateStr) {
     if (!dateStr) return;
+    stopPlayback();
     const parts = dateStr.split('-').map(Number);
     if (parts.length !== 3 || parts.some(n => !Number.isFinite(n))) return;
     const start = new Date(parts[0], parts[1] - 1, parts[2], 0, 0, 0, 0).getTime();
@@ -974,6 +1280,7 @@
       mode = null;
       wrap.classList.remove('panning');
       if (wasClick) {
+        stopPlayback();
         if (vs) state.selected = vs;
         state.playheadMs = Math.round(ms);
         updateHeader();
@@ -981,6 +1288,7 @@
         if (state.selected) await Promise.all([loadSlice(), loadTrack()]);
         else await loadSlice();
       } else if (wasPan) {
+        stopPlayback();
         await refreshActivity();
         await loadTrack();
       }
@@ -1032,6 +1340,7 @@
     setupTabs();
     initMap();
     setupTimelineInteractions();
+    setupTransport();
     window.addEventListener('resize', () => {
       renderTimeline();
       invalidateMap();
