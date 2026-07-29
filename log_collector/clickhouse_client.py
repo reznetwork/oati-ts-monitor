@@ -14,54 +14,66 @@ from typing import Any, Iterable, List, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
-DDL_STATEMENTS = (
-    """
-    CREATE TABLE IF NOT EXISTS full_log_snapshots (
-        device_id String,
-        vehicle String,
-        vehicle_short String,
-        segment String,
-        ts_ms Int64,
-        data String,
-        ingested_at DateTime64(3) DEFAULT now64(3)
-    ) ENGINE = ReplacingMergeTree(ingested_at)
-    ORDER BY (vehicle_short, ts_ms, device_id, segment)
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS full_log_events (
-        device_id String,
-        vehicle String,
-        vehicle_short String,
-        segment String,
-        ts_ms Int64,
-        kind String,
-        payload String,
-        lat Nullable(Float64),
-        lon Nullable(Float64),
-        rssi_dbm Nullable(Float64),
-        bssid Nullable(String),
-        ingested_at DateTime64(3) DEFAULT now64(3)
-    ) ENGINE = ReplacingMergeTree(ingested_at)
-    ORDER BY (vehicle_short, ts_ms, kind, device_id, segment)
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS ingested_segments (
-        device_id String,
-        vehicle String,
-        vehicle_short String,
-        segment String,
-        min_ts_ms Int64,
-        max_ts_ms Int64,
-        row_count UInt64,
-        ingested_at DateTime64(3) DEFAULT now64(3)
-    ) ENGINE = ReplacingMergeTree(ingested_at)
-    ORDER BY (device_id, vehicle_short, segment)
-    """,
-)
-
 
 class ClickHouseUnavailable(RuntimeError):
     """Raised when ClickHouse is not configured or the client library is missing."""
+
+
+def _validate_db_name(name: str) -> str:
+    """Allow only safe ClickHouse identifiers for database names."""
+    db = (name or "").strip()
+    if not db or not all(c.isalnum() or c == "_" for c in db):
+        raise ClickHouseUnavailable(f"Invalid ClickHouse database name: {name!r}")
+    return db
+
+
+def _ddl_statements(database: str) -> tuple[str, ...]:
+    """DDL with fully-qualified table names (HTTP has no persistent USE session)."""
+    db = _validate_db_name(database)
+    return (
+        f"""
+        CREATE TABLE IF NOT EXISTS {db}.full_log_snapshots (
+            device_id String,
+            vehicle String,
+            vehicle_short String,
+            segment String,
+            ts_ms Int64,
+            data String,
+            ingested_at DateTime64(3) DEFAULT now64(3)
+        ) ENGINE = ReplacingMergeTree(ingested_at)
+        ORDER BY (vehicle_short, ts_ms, device_id, segment)
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS {db}.full_log_events (
+            device_id String,
+            vehicle String,
+            vehicle_short String,
+            segment String,
+            ts_ms Int64,
+            kind String,
+            payload String,
+            lat Nullable(Float64),
+            lon Nullable(Float64),
+            rssi_dbm Nullable(Float64),
+            bssid Nullable(String),
+            ingested_at DateTime64(3) DEFAULT now64(3)
+        ) ENGINE = ReplacingMergeTree(ingested_at)
+        ORDER BY (vehicle_short, ts_ms, kind, device_id, segment)
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS {db}.ingested_segments (
+            device_id String,
+            vehicle String,
+            vehicle_short String,
+            segment String,
+            min_ts_ms Int64,
+            max_ts_ms Int64,
+            row_count UInt64,
+            ingested_at DateTime64(3) DEFAULT now64(3)
+        ) ENGINE = ReplacingMergeTree(ingested_at)
+        ORDER BY (device_id, vehicle_short, segment)
+        """,
+    )
 
 
 @dataclass
@@ -116,7 +128,7 @@ class ClickHouseStore:
             database="default",
         )
         self._ensure_schema()
-        # Reconnect using the target database as default
+        # Prefer the target DB as the client default for unqualified table refs.
         self._client = clickhouse_connect.get_client(
             host=config.host,
             port=config.port,
@@ -131,10 +143,10 @@ class ClickHouseStore:
 
     def _ensure_schema(self) -> None:
         assert self._client is not None
-        db = self.config.database
+        db = _validate_db_name(self.config.database)
+        # Do not rely on USE — clickhouse-connect HTTP calls are not session-sticky.
         self._client.command(f"CREATE DATABASE IF NOT EXISTS {db}")
-        self._client.command(f"USE {db}")
-        for stmt in DDL_STATEMENTS:
+        for stmt in _ddl_statements(db):
             self._client.command(stmt.strip())
         logger.info("ClickHouse schema ready in database %s", db)
 
@@ -145,12 +157,13 @@ class ClickHouseStore:
 
     def is_segment_ingested(self, device_id: str, vehicle_short: str, segment: str) -> bool:
         client = self._require()
+        db = _validate_db_name(self.config.database)
         result = client.query(
-            """
-            SELECT count() FROM ingested_segments FINAL
-            WHERE device_id = {device_id:String}
-              AND vehicle_short = {vehicle_short:String}
-              AND segment = {segment:String}
+            f"""
+            SELECT count() FROM {db}.ingested_segments FINAL
+            WHERE device_id = {{device_id:String}}
+              AND vehicle_short = {{vehicle_short:String}}
+              AND segment = {{segment:String}}
             """,
             parameters={
                 "device_id": device_id,
