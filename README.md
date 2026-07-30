@@ -204,7 +204,27 @@ The collector listens at `http://<host>:9000/ingest` and shows its dashboard at 
 `/viewer` is one application with two modes:
 
 - **Historical Replay** retains the vehicle timeline, state snapshot, route, and roaming replay.
-- **Wi-Fi Quality** aggregates selected vehicles/base stations into zoom-aware H3 cells and scores RSSI, gateway availability/latency, traffic or link rate, beacon loss, and roaming.
+- **Wi-Fi Quality** aggregates selected vehicles/base stations and scores RSSI, gateway availability/latency, traffic or link rate, beacon loss, and roaming. Its display selector offers the original zoom-aware H3 cells and a continuous seamless surface.
+
+The seamless display interpolates nearby H3 observations with inverse-distance
+weighting. It supports the current viewport or a polygon/rectangle drawn with the map
+tools. Interpolation is clipped to the selected area and fades beyond the supported
+sample radius so unmeasured distant regions are not presented as measured coverage.
+Click a surface to inspect the nearest contributing cell and its sample count,
+confidence, vehicles, BSSIDs, raw values, and normalized scores.
+
+For one selected base station, all BSSIDs assigned to that station form one surface.
+With multiple stations selected, choose:
+
+- **Aggregate** for a sample-weighted surface across all selected stations.
+- **Best at each location** for the station with the highest normalized selected-metric score in each cell.
+- **Separate layers** for independently toggleable station surfaces.
+
+The layer menu can display normalized 0–100 quality or raw engineering values: RSSI
+in dBm, gateway latency in milliseconds, traffic/link rate in Mbps, beacon losses per
+sample, and roaming events per 1,000 samples. Composite quality is normalized only.
+Raw colors use the active profile's poor/good thresholds; confidence continues to
+control opacity.
 
 Each quality profile can use automatic zoom-based H3 sizing or pin a fixed H3
 resolution from 4 (large regional cells) through 13 (approximately 3.5 m edges).

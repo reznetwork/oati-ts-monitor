@@ -315,6 +315,33 @@ def _csv_values(request: web.Request, name: str) -> list[str]:
     return values
 
 
+def _quality_polygon(raw: Optional[str]) -> Optional[list[list[float]]]:
+    if not raw:
+        return None
+    value = json.loads(raw)
+    if not isinstance(value, dict) or value.get("type") != "Polygon":
+        raise ValueError("area must be a GeoJSON Polygon")
+    coordinates = value.get("coordinates")
+    if (
+        not isinstance(coordinates, list)
+        or len(coordinates) != 1
+        or not isinstance(coordinates[0], list)
+        or len(coordinates[0]) < 3
+        or len(coordinates[0]) > 500
+    ):
+        raise ValueError("area must be one exterior polygon ring with 3 to 500 points")
+    polygon: list[list[float]] = []
+    for point in coordinates[0]:
+        if not isinstance(point, list) or len(point) < 2:
+            raise ValueError("area polygon coordinates must be [longitude, latitude]")
+        polygon.append([float(point[1]), float(point[0])])
+    if polygon[0] == polygon[-1]:
+        polygon.pop()
+    if len(polygon) < 3:
+        raise ValueError("area polygon must contain at least three distinct points")
+    return polygon
+
+
 async def handle_wifi_quality(request: web.Request) -> web.Response:
     q = request.rel_url.query
     try:
@@ -323,6 +350,14 @@ async def handle_wifi_quality(request: web.Request) -> web.Response:
         profile_id = int(q["profile_id"]) if q.get("profile_id") else None
         station_ids = [int(v) for v in _csv_values(request, "station_ids")]
         bounds = [float(v) for v in q["bounds"].split(",")] if q.get("bounds") else None
+        polygon = _quality_polygon(q.get("area"))
+        if polygon:
+            bounds = [
+                min(point[0] for point in polygon),
+                min(point[1] for point in polygon),
+                max(point[0] for point in polygon),
+                max(point[1] for point in polygon),
+            ]
         result = await asyncio.to_thread(
             _quality_service(request).heatmap,
             from_ms=from_ms,
@@ -332,11 +367,16 @@ async def handle_wifi_quality(request: web.Request) -> web.Response:
             profile_id=profile_id,
             resolution=resolution,
             bounds=bounds,
+            display=q.get("display", "h3"),
+            station_mode=q.get("station_mode", "aggregate"),
+            metric=q.get("metric", "composite"),
+            value_mode=q.get("value_mode", "score"),
+            polygon=polygon,
             allow_large_range=q.get("allow_large_range") in ("1", "true", "yes"),
         )
     except OverflowError as exc:
         return _json({"error": str(exc), "requires_override": True}, status=422)
-    except (KeyError, TypeError, ValueError) as exc:
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         raise web.HTTPBadRequest(reason=str(exc)) from exc
     return _json(result)
 

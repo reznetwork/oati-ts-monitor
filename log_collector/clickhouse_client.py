@@ -693,6 +693,7 @@ class ClickHouseStore:
         resolution: int,
         bounds: Optional[Sequence[float]] = None,
         limit: int = 12_000,
+        group_by_bssid: bool = False,
     ) -> List[dict]:
         """Aggregate normalized metric states into viewport-aware H3 cells."""
         client = self._require()
@@ -718,13 +719,17 @@ class ClickHouseStore:
                 f"tupleElement(h3ToGeo(h3_13), {lon_index}) BETWEEN {{west:Float64}} AND {{east:Float64}}",
             ])
             params.update({"south": south, "west": west, "north": north, "east": east})
+        grouped_select = ", bssid AS grouped_bssid" if group_by_bssid else ""
+        grouped_by = "cell, grouped_bssid" if group_by_bssid else "cell"
         result = client.query(
             f"""
             SELECT
                 h3ToParent(h3_13, {{resolution:UInt8}}) AS cell,
                 h3ToGeoBoundary(cell) AS boundary,
+                h3ToGeo(cell) AS center,
                 groupUniqArray(20)(vehicle_short) AS vehicles,
-                groupUniqArray(20)(bssid) AS bssids,
+                groupUniqArray(20)(bssid) AS bssids
+                {grouped_select},
                 sum(sample_count), sum(rssi_sum), sum(rssi_count),
                 sum(latency_sum), sum(latency_count),
                 sum(gateway_ok_sum), sum(gateway_ok_count),
@@ -733,7 +738,7 @@ class ClickHouseStore:
                 sum(beacon_loss_sum), sum(beacon_loss_count), sum(roam_count)
             FROM {self.config.database}.wifi_quality_rollups_v2 FINAL
             WHERE {' AND '.join(where)}
-            GROUP BY cell
+            GROUP BY {grouped_by}
             ORDER BY sum(sample_count) DESC
             LIMIT {{limit:UInt32}}
             """,
@@ -748,12 +753,26 @@ class ClickHouseStore:
         out: List[dict] = []
         for row in result.result_rows:
             boundary = [[float(p[0]), float(p[1])] for p in (row[1] or [])]
+            center = row[2] or (0, 0)
+            center_lat, center_lon = (
+                (float(center[0]), float(center[1]))
+                if self._modern_h3_geo_order
+                else (float(center[1]), float(center[0]))
+            )
             item = {
                 "cell": str(row[0]), "boundary": boundary,
-                "vehicles": [str(v) for v in (row[2] or [])],
-                "bssids": [str(v) for v in (row[3] or [])],
+                "center": [center_lat, center_lon],
+                "vehicles": [str(v) for v in (row[3] or [])],
+                "bssids": [str(v) for v in (row[4] or [])],
             }
-            item.update({name: float(value or 0) for name, value in zip(fields, row[4:])})
+            value_offset = 5
+            if group_by_bssid:
+                item["grouped_bssid"] = str(row[value_offset])
+                value_offset += 1
+            item.update({
+                name: float(value or 0)
+                for name, value in zip(fields, row[value_offset:])
+            })
             out.append(item)
         return out
 

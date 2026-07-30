@@ -32,6 +32,33 @@ class TestWifiQualityDerivation(unittest.TestCase):
         self.assertIn("AS bucket_ms", client.sql)
         self.assertIn("AS h3_13", client.sql)
 
+    def test_quality_query_can_group_by_bssid_and_returns_centers(self):
+        class Result:
+            result_rows = [[
+                123, [[1.0, 2.0], [1.1, 2.1]], (1.05, 2.05), ["v1"],
+                ["aa:bb:cc:dd:ee:ff"], "aa:bb:cc:dd:ee:ff",
+                *([1] * 14),
+            ]]
+
+        class Client:
+            def query(self, sql, parameters=None):
+                self.sql = sql
+                self.parameters = parameters
+                return Result()
+
+        client = Client()
+        store = ClickHouseStore.__new__(ClickHouseStore)
+        store.config = ClickHouseConfig(database="logs")
+        store._modern_h3_geo_order = True
+        store._require = lambda: client
+        cells = store.wifi_quality_cells(
+            from_ms=0, to_ms=1, vehicles=[], bssids=[], resolution=9,
+            group_by_bssid=True,
+        )
+        self.assertIn("GROUP BY cell, grouped_bssid", client.sql)
+        self.assertEqual(cells[0]["center"], [1.05, 2.05])
+        self.assertEqual(cells[0]["grouped_bssid"], "aa:bb:cc:dd:ee:ff")
+
     def test_counter_rates_and_reset_handling(self):
         def event(ts, tx, rx):
             import json
@@ -103,15 +130,95 @@ class TestMetadataStore(unittest.TestCase):
 
 
 class FakeClickHouse:
-    def __init__(self):
+    def __init__(self, rows=None):
         self.last_query = None
+        self.rows = rows or []
 
     def wifi_quality_cells(self, **kwargs):
         self.last_query = kwargs
-        return []
+        return self.rows
 
     def discovered_bssids(self):
         return []
+
+
+def quality_row(bssid, rssi, samples, *, cell="123", center=(1.0, 2.0)):
+    return {
+        "cell": cell,
+        "boundary": [[0.9, 1.9], [1.1, 1.9], [1.0, 2.1]],
+        "center": list(center),
+        "vehicles": ["v1"],
+        "bssids": [bssid],
+        "grouped_bssid": bssid,
+        "sample_count": samples,
+        "rssi_sum": rssi * samples,
+        "rssi_count": samples,
+        "latency_sum": 0,
+        "latency_count": 0,
+        "gateway_ok_sum": 0,
+        "gateway_ok_count": 0,
+        "link_rate_sum": 0,
+        "link_rate_count": 0,
+        "traffic_rate_sum": 0,
+        "traffic_rate_count": 0,
+        "beacon_loss_sum": 0,
+        "beacon_loss_count": 0,
+        "roam_count": 0,
+    }
+
+
+class TestSeamlessSurfaces(unittest.TestCase):
+    def make_service(self, directory):
+        metadata = MetadataStore(f"{directory}/metadata.sqlite3")
+        metadata.sync_discovered([
+            {"bssid": "aa:bb:cc:dd:ee:ff", "lat": 1, "lon": 2, "rssi_dbm": -60},
+            {"bssid": "11:22:33:44:55:66", "lat": 1, "lon": 2, "rssi_dbm": -80},
+        ])
+        clickhouse = FakeClickHouse([
+            quality_row("aa:bb:cc:dd:ee:ff", -60, 10),
+            quality_row("11:22:33:44:55:66", -80, 20),
+        ])
+        return WiFiQualityService(clickhouse, metadata), clickhouse
+
+    def test_aggregate_best_and_separate_station_surfaces(self):
+        with tempfile.TemporaryDirectory() as td:
+            service, clickhouse = self.make_service(td)
+            aggregate = service.heatmap(
+                from_ms=0, to_ms=86_400_000, display="seamless",
+                station_mode="aggregate", metric="rssi",
+            )
+            self.assertTrue(clickhouse.last_query["group_by_bssid"])
+            self.assertEqual(len(aggregate["cells"]), 1)
+            self.assertAlmostEqual(aggregate["cells"][0]["metrics"]["rssi"]["value"], -73.333, places=3)
+            self.assertEqual(aggregate["cells"][0]["sample_count"], 30)
+
+            best = service.heatmap(
+                from_ms=0, to_ms=86_400_000, display="seamless",
+                station_mode="best", metric="rssi",
+            )
+            self.assertEqual(best["cells"][0]["bssids"], ["aa:bb:cc:dd:ee:ff"])
+            self.assertGreater(best["cells"][0]["metrics"]["rssi"]["score"], 80)
+
+            separate = service.heatmap(
+                from_ms=0, to_ms=86_400_000, display="seamless",
+                station_mode="separate", metric="rssi",
+            )
+            self.assertEqual(len(separate["surfaces"]), 2)
+            self.assertTrue(all(len(surface["cells"]) == 1 for surface in separate["surfaces"]))
+            self.assertEqual(separate["summary"]["samples"], 30)
+
+    def test_polygon_filter_and_option_validation(self):
+        with tempfile.TemporaryDirectory() as td:
+            service, _ = self.make_service(td)
+            result = service.heatmap(
+                from_ms=0, to_ms=86_400_000, display="seamless",
+                polygon=[[10, 10], [10, 11], [11, 11], [11, 10]],
+            )
+            self.assertEqual(result["cells"], [])
+            with self.assertRaises(ValueError):
+                service.heatmap(from_ms=0, to_ms=1, display="raster")
+            with self.assertRaises(ValueError):
+                service.heatmap(from_ms=0, to_ms=1, value_mode="raw", metric="composite")
 
 
 class TestRangeGuard(unittest.TestCase):
@@ -142,6 +249,33 @@ class TestRangeGuard(unittest.TestCase):
             self.assertEqual(clickhouse.last_query["resolution"], 13)
             with self.assertRaises(ValueError):
                 metadata.save_profile({**definition, "name": "Invalid", "h3_resolution": 14})
+
+
+class TestQualityApiValidation(unittest.IsolatedAsyncioTestCase):
+    async def test_rejects_invalid_display_and_geojson(self):
+        with tempfile.TemporaryDirectory() as td:
+            metadata = MetadataStore(f"{td}/m.db")
+            app = make_app(
+                ChunkStorage(f"{td}/logs"), clickhouse=FakeClickHouse(), metadata=metadata
+            )
+            async with TestClient(TestServer(app)) as client:
+                response = await client.get(
+                    "/api/wifi-quality?from_ms=0&to_ms=1&display=invalid"
+                )
+                self.assertEqual(response.status, 400)
+                response = await client.get(
+                    "/api/wifi-quality?from_ms=0&to_ms=1&display=seamless&area=%7B%22type%22%3A%22Point%22%7D"
+                )
+                self.assertEqual(response.status, 400)
+                response = await client.get("/api/wifi-quality", params={
+                    "from_ms": "0", "to_ms": "1", "display": "seamless",
+                    "area": (
+                        '{"type":"Polygon","coordinates":['
+                        '[[0,0],[2,0],[2,2],[0,0]],'
+                        '[[.5,.5],[1,.5],[.5,1],[.5,.5]]]}'
+                    ),
+                })
+                self.assertEqual(response.status, 400)
 
 
 class TestAuthentication(unittest.IsolatedAsyncioTestCase):

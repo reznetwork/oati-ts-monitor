@@ -5,7 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>oati-ts-monitor · Historical Log Viewer</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
 <style>
   :root {
     --bg: #0b1419;
@@ -253,6 +255,12 @@
     color:var(--text); padding:5px 7px; min-width:130px;
   }
   .quality-toolbar select[multiple] { height:52px; }
+  .quality-toolbar .seamless-only { display:none; }
+  body.seamless-quality .quality-toolbar .seamless-only { display:flex; }
+  .quality-area-state { align-self:center; max-width:150px; color:var(--muted); font-size:11px; }
+  .leaflet-control-layers { background:rgba(15,27,33,.94); color:var(--text); border-color:var(--border-strong); }
+  .leaflet-control-layers label { color:var(--secondary); }
+  .seamless-heat-canvas { pointer-events:none; image-rendering:auto; }
   .quality-summary { display:none; position:absolute; right:10px; top:10px; z-index:500;
     min-width:180px; background:rgba(15,27,33,.94); border:1px solid var(--border-strong);
     border-radius:8px; padding:10px; }
@@ -325,13 +333,25 @@
         <label>To <input id="quality-to" type="datetime-local"></label>
         <label>Vehicles <select id="quality-vehicles" multiple></select></label>
         <label>Base stations <select id="quality-stations" multiple></select></label>
+        <label>Display <select id="quality-display">
+          <option value="h3">H3 cells</option><option value="seamless">Seamless surface</option>
+        </select></label>
         <label>Layer <select id="quality-layer">
           <option value="composite">Composite 0–100</option><option value="rssi">RSSI</option>
           <option value="latency">Gateway latency</option><option value="rate">Traffic/link rate</option>
           <option value="beacon_loss">Beacon loss</option><option value="roaming">Roaming</option>
         </select></label>
+        <label>Values <select id="quality-values">
+          <option value="score">Normalized score</option><option value="raw">Raw engineering value</option>
+        </select></label>
+        <label class="seamless-only">Multiple BSs <select id="quality-station-mode">
+          <option value="aggregate">Aggregate</option><option value="best">Best at each location</option>
+          <option value="separate">Separate layers</option>
+        </select></label>
         <label>Profile <select id="quality-profile"></select></label>
         <label style="flex-direction:row;align-items:center"><input id="quality-hide-low" type="checkbox"> Hide low confidence</label>
+        <button class="seamless-only" type="button" id="quality-area-clear">Clear drawn area</button>
+        <span class="quality-area-state seamless-only" id="quality-area-state">Using current viewport</span>
         <button type="button" id="quality-apply">Apply</button>
         <span class="notice" id="quality-warning"></span>
       </div>
@@ -476,6 +496,11 @@
     pathLayer: null,
     roamLayer: null,
     qualityLayer: null,
+    qualityData: null,
+    seamlessLayers: [],
+    seamlessControl: null,
+    qualityAreaLayer: null,
+    qualityDrawControl: null,
     marker: null,
     mode: new URLSearchParams(location.search).get('mode') === 'quality' ? 'quality' : 'replay',
     appConfig: {},
@@ -650,6 +675,115 @@
     return '#ef4444';
   }
 
+  function scoreRgb(score) {
+    const stops = [[0,[239,68,68]],[25,[249,115,22]],[50,[234,179,8]],[75,[34,197,94]],[100,[22,163,74]]];
+    const value = Math.max(0, Math.min(100, Number(score) || 0));
+    for (let i = 1; i < stops.length; i++) {
+      if (value <= stops[i][0]) {
+        const a = stops[i - 1], b = stops[i], t = (value - a[0]) / (b[0] - a[0]);
+        return a[1].map((channel, j) => Math.round(channel + (b[1][j] - channel) * t));
+      }
+    }
+    return stops[stops.length - 1][1];
+  }
+
+  const SeamlessHeatLayer = L.Layer.extend({
+    initialize(points, options) {
+      L.setOptions(this, options);
+      this._points = points || [];
+    },
+    onAdd(map) {
+      this._map = map;
+      this._canvas = L.DomUtil.create('canvas', 'leaflet-layer seamless-heat-canvas');
+      map.getPanes().overlayPane.appendChild(this._canvas);
+      map.on('moveend zoomend resize', this._render, this);
+      this._render();
+    },
+    onRemove(map) {
+      map.off('moveend zoomend resize', this._render, this);
+      this._canvas.remove();
+      this._canvas = null;
+    },
+    setPoints(points) {
+      this._points = points || [];
+      if (this._map) this._render();
+    },
+    _render() {
+      if (!this._map || !this._canvas) return;
+      const size = this._map.getSize();
+      if (!size.x || !size.y) return;
+      const topLeft = this._map.containerPointToLayerPoint([0, 0]);
+      L.DomUtil.setPosition(this._canvas, topLeft);
+      this._canvas.width = size.x;
+      this._canvas.height = size.y;
+      const scale = 4;
+      const width = Math.max(1, Math.ceil(size.x / scale));
+      const height = Math.max(1, Math.ceil(size.y / scale));
+      const support = Math.max(20, Number(this.options.supportRadius || 180) / scale);
+      const projected = [];
+      const buckets = new Map();
+      for (const point of this._points) {
+        if (!Number.isFinite(point.value)) continue;
+        const pixel = this._map.latLngToContainerPoint(point.latlng).divideBy(scale);
+        const item = {...point, x:pixel.x, y:pixel.y};
+        projected.push(item);
+        const key = `${Math.floor(item.x / support)},${Math.floor(item.y / support)}`;
+        if (!buckets.has(key)) buckets.set(key, []);
+        buckets.get(key).push(item);
+      }
+      const small = document.createElement('canvas');
+      small.width = width; small.height = height;
+      const smallContext = small.getContext('2d');
+      const image = smallContext.createImageData(width, height);
+      const power = Number(this.options.power || 2);
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const bx = Math.floor(x / support), by = Math.floor(y / support);
+          const nearby = [];
+          for (let oy = -1; oy <= 1; oy++) for (let ox = -1; ox <= 1; ox++) {
+            for (const point of buckets.get(`${bx + ox},${by + oy}`) || []) {
+              const distance2 = (point.x - x) ** 2 + (point.y - y) ** 2;
+              if (distance2 <= support ** 2) nearby.push([distance2, point]);
+            }
+          }
+          if (!nearby.length) continue;
+          nearby.sort((a,b) => a[0] - b[0]);
+          let weightedValue = 0, weightedConfidence = 0, totalWeight = 0;
+          for (const [distance2, point] of nearby.slice(0, 12)) {
+            const weight = 1 / Math.max(.25, distance2 ** (power / 2));
+            weightedValue += point.value * weight;
+            weightedConfidence += (point.confidence || 0) * weight;
+            totalWeight += weight;
+          }
+          const value = weightedValue / totalWeight;
+          const confidence = weightedConfidence / totalWeight;
+          const score = this.options.valueToScore ? this.options.valueToScore(value) : value;
+          if (!Number.isFinite(score)) continue;
+          const rgb = scoreRgb(score);
+          const offset = (y * width + x) * 4;
+          image.data[offset] = rgb[0]; image.data[offset + 1] = rgb[1]; image.data[offset + 2] = rgb[2];
+          image.data[offset + 3] = Math.round(255 * Math.max(.12, Math.min(.78, confidence * .78)));
+        }
+      }
+      smallContext.putImageData(image, 0, 0);
+      const context = this._canvas.getContext('2d');
+      context.clearRect(0, 0, size.x, size.y);
+      if (this.options.polygon && this.options.polygon.length >= 3) {
+        context.save();
+        context.beginPath();
+        this.options.polygon.forEach((latlng, index) => {
+          const point = this._map.latLngToContainerPoint(latlng);
+          if (index) context.lineTo(point.x, point.y); else context.moveTo(point.x, point.y);
+        });
+        context.closePath();
+        context.clip();
+      }
+      context.imageSmoothingEnabled = true;
+      context.drawImage(small, 0, 0, size.x, size.y);
+      if (this.options.polygon && this.options.polygon.length >= 3) context.restore();
+    },
+  });
+
   function initMap() {
     state.map = L.map('map', { zoomControl: true }).setView([55.75, 37.62], 12);
     L.tileLayer(state.appConfig.tile_url || 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -659,6 +793,19 @@
     state.pathLayer = L.layerGroup();
     state.roamLayer = L.layerGroup();
     state.qualityLayer = L.layerGroup();
+    state.qualityAreaLayer = L.featureGroup();
+    state.qualityDrawControl = new L.Control.Draw({
+      position: 'topleft',
+      draw: {polyline:false, circle:false, circlemarker:false, marker:false,
+        polygon:{allowIntersection:false, showArea:true}, rectangle:{showArea:true}},
+      edit: {featureGroup:state.qualityAreaLayer, edit:false, remove:false},
+    });
+    state.map.on(L.Draw.Event.CREATED, event => {
+      state.qualityAreaLayer.clearLayers();
+      state.qualityAreaLayer.addLayer(event.layer);
+      $('quality-area-state').textContent = 'Using drawn area';
+      if (state.mode === 'quality' && $('quality-display').value === 'seamless') loadQuality();
+    });
     if (state.layers.path) state.pathLayer.addTo(state.map);
     if (state.layers.roam) state.roamLayer.addTo(state.map);
     setupMapLayers();
@@ -1502,16 +1649,29 @@
   }
 
   function setLegend(quality) {
-    $('map-legend').innerHTML = quality
-      ? `<h4>Normalized quality</h4>
-         <div class="map-legend-row"><span class="map-legend-swatch" style="background:#22c55e"></span>75–100 good</div>
-         <div class="map-legend-row"><span class="map-legend-swatch" style="background:#eab308"></span>50–74 fair</div>
-         <div class="map-legend-row"><span class="map-legend-swatch" style="background:#f97316"></span>25–49 poor</div>
-         <div class="map-legend-row"><span class="map-legend-swatch" style="background:#ef4444"></span>0–24 critical</div>`
-      : `<h4>RSSI</h4>
+    if (!quality) {
+      $('map-legend').innerHTML = `<h4>RSSI</h4>
          <div class="map-legend-row"><span class="map-legend-swatch" style="background:#22c55e"></span>−40 … −68 dBm</div>
          <div class="map-legend-row"><span class="map-legend-swatch" style="background:#eab308"></span>−68 … −77 dBm</div>
          <div class="map-legend-row"><span class="map-legend-swatch" style="background:#ef4444"></span>≤ −77 dBm</div>`;
+      return;
+    }
+    const metric = $('quality-layer').value;
+    const raw = $('quality-values').value === 'raw' && metric !== 'composite';
+    const units = {rssi:'dBm',latency:'ms',rate:'Mbps',beacon_loss:'losses/sample',roaming:'roams/1000'};
+    const profile = state.qualityData?.profile ||
+      state.profiles.find(item => String(item.id) === $('quality-profile').value)?.definition;
+    const config = profile?.metrics?.[metric];
+    $('map-legend').innerHTML = raw && config
+      ? `<h4>${esc(metric)} · ${esc(units[metric] || '')}</h4>
+         <div class="map-legend-row"><span class="map-legend-swatch" style="background:#22c55e"></span>Good ${esc(config.good)}</div>
+         <div class="map-legend-row"><span class="map-legend-swatch" style="background:#eab308"></span>Interpolated raw value</div>
+         <div class="map-legend-row"><span class="map-legend-swatch" style="background:#ef4444"></span>Poor ${esc(config.poor)}</div>`
+      : `<h4>${esc(metric)} · normalized</h4>
+         <div class="map-legend-row"><span class="map-legend-swatch" style="background:#22c55e"></span>75–100 good</div>
+         <div class="map-legend-row"><span class="map-legend-swatch" style="background:#eab308"></span>50–74 fair</div>
+         <div class="map-legend-row"><span class="map-legend-swatch" style="background:#f97316"></span>25–49 poor</div>
+         <div class="map-legend-row"><span class="map-legend-swatch" style="background:#ef4444"></span>0–24 critical</div>`;
   }
 
   function h3ResolutionForZoom(zoom) {
@@ -1532,6 +1692,160 @@
     renderProfiles();
   }
 
+  function qualityAreaPolygon() {
+    const layer = state.qualityAreaLayer?.getLayers()[0];
+    if (!layer) return null;
+    const geometry = layer.toGeoJSON().geometry;
+    return geometry?.type === 'Polygon' ? geometry : null;
+  }
+
+  function qualityAreaLatLngs() {
+    const geometry = qualityAreaPolygon();
+    return geometry ? geometry.coordinates[0].slice(0, -1).map(point => L.latLng(point[1], point[0])) : null;
+  }
+
+  function rawScore(metric, value, profile) {
+    const config = profile?.metrics?.[metric];
+    if (!config || !Number.isFinite(value)) return null;
+    if (Number(config.good) === Number(config.poor)) return value >= Number(config.good) ? 100 : 0;
+    return Math.max(0, Math.min(100,
+      (value - Number(config.poor)) / (Number(config.good) - Number(config.poor)) * 100));
+  }
+
+  function qualityCellValue(cell) {
+    const metric = $('quality-layer').value;
+    const raw = $('quality-values').value === 'raw' && metric !== 'composite';
+    if (metric === 'composite') return cell.score;
+    return cell.metrics?.[metric]?.[raw ? 'value' : 'score'];
+  }
+
+  function qualityCellScore(cell, profile) {
+    const metric = $('quality-layer').value;
+    const value = qualityCellValue(cell);
+    return $('quality-values').value === 'raw' && metric !== 'composite'
+      ? rawScore(metric, value, profile) : value;
+  }
+
+  function qualityValueText(cell) {
+    const metric = $('quality-layer').value;
+    const value = qualityCellValue(cell);
+    const units = {rssi:' dBm',latency:' ms',rate:' Mbps',beacon_loss:' losses/sample',roaming:' roams/1000'};
+    return value == null ? '—' : `${Number(value).toLocaleString(undefined, {maximumFractionDigits:2})}${units[metric] || ''}`;
+  }
+
+  function clearQualityLayers() {
+    state.qualityLayer.clearLayers();
+    state.seamlessLayers = [];
+    if (state.seamlessControl) {
+      state.map.removeControl(state.seamlessControl);
+      state.seamlessControl = null;
+    }
+  }
+
+  function qualityPopup(cell) {
+    const metrics = Object.entries(cell.metrics || {}).map(([key,value]) =>
+      `${esc(key)}: ${value.value == null ? '—' : esc(value.value)} (${value.score == null ? '—' : esc(value.score)})`
+    ).join('<br>');
+    const stations = cell.station_name || (cell.station_names || []).join(', ');
+    return `<strong>${esc($('quality-layer').value)} ${esc(qualityValueText(cell))}</strong>
+      <br>Composite ${cell.score ?? '—'}<br>Samples ${cell.sample_count}
+      <br>Confidence ${Math.round((cell.confidence || 0) * 100)}%
+      <br>Station(s): ${esc(stations || '—')}
+      <br>Vehicles: ${(cell.vehicles || []).map(esc).join(', ') || '—'}
+      <br>BSSIDs: ${(cell.bssids || []).map(esc).join(', ') || '—'}<br>${metrics}`;
+  }
+
+  function renderH3Quality(data) {
+    const profile = data.profile || {};
+    for (const cell of data.cells || []) {
+      if ($('quality-hide-low').checked && (cell.confidence || 0) < .5) continue;
+      const displayScore = qualityCellScore(cell, profile);
+      const polygon = L.polygon(cell.boundary, {
+        color: qualityColor(displayScore), fillColor: qualityColor(displayScore),
+        fillOpacity: Math.max(.18, .72 * (cell.confidence || 0)), weight: 1,
+      });
+      polygon.bindPopup(qualityPopup(cell));
+      polygon.addTo(state.qualityLayer);
+    }
+  }
+
+  function renderSeamlessQuality(data) {
+    const profile = data.profile || {};
+    const raw = $('quality-values').value === 'raw' && $('quality-layer').value !== 'composite';
+    const surfaces = data.surfaces?.length ? data.surfaces :
+      [{key:'aggregate',station_name:'All selected stations',cells:data.cells || []}];
+    const overlays = {};
+    for (const surface of surfaces) {
+      const points = (surface.cells || [])
+        .filter(cell => !$('quality-hide-low').checked || (cell.confidence || 0) >= .5)
+        .map(cell => ({
+          latlng:L.latLng(cell.center[0], cell.center[1]),
+          value:qualityCellValue(cell), confidence:cell.confidence || 0, cell,
+        }))
+        .filter(point => Number.isFinite(point.value));
+      if (!points.length) continue;
+      const layer = new SeamlessHeatLayer(points, {
+        polygon:qualityAreaLatLngs(),
+        valueToScore: raw
+          ? value => rawScore($('quality-layer').value, value, profile)
+          : value => value,
+      });
+      state.qualityLayer.addLayer(layer);
+      state.seamlessLayers.push(layer);
+      const stationLabel = surface.station_name || surface.key;
+      const uniqueLabel = surface.station_id == null
+        ? stationLabel : `${stationLabel} (#${surface.station_id})`;
+      overlays[uniqueLabel] = layer;
+    }
+    if (Object.keys(overlays).length > 1) {
+      state.seamlessControl = L.control.layers(null, overlays, {collapsed:false}).addTo(state.map);
+    }
+  }
+
+  function renderQuality(data) {
+    clearQualityLayers();
+    state.qualityData = data;
+    if ($('quality-display').value === 'seamless') renderSeamlessQuality(data);
+    else renderH3Quality(data);
+    const summary = data.summary || {};
+    $('quality-summary').innerHTML = `<div>Combined score</div><strong>${summary.score ?? '—'}</strong>
+      <div>Samples ${Number(summary.samples || 0).toLocaleString()}</div>
+      <div>Cells ${summary.cells || 0} · Roams ${summary.roams || 0}</div>
+      <div>Confidence ${summary.confidence || 0}%</div>`;
+    setLegend(true);
+  }
+
+  function updateQualityControls() {
+    const seamless = $('quality-display').value === 'seamless';
+    document.body.classList.toggle('seamless-quality', seamless && state.mode === 'quality');
+    const rawOption = $('quality-values').querySelector('option[value="raw"]');
+    rawOption.disabled = $('quality-layer').value === 'composite';
+    if (rawOption.disabled && $('quality-values').value === 'raw') $('quality-values').value = 'score';
+    if (seamless && state.mode === 'quality') {
+      if (!state.qualityDrawControl._map) state.map.addControl(state.qualityDrawControl);
+      if (!state.map.hasLayer(state.qualityAreaLayer)) state.qualityAreaLayer.addTo(state.map);
+    } else if (state.qualityDrawControl?._map) {
+      state.map.removeControl(state.qualityDrawControl);
+      state.map.removeLayer(state.qualityAreaLayer);
+    }
+    setLegend(state.mode === 'quality');
+  }
+
+  function showQualityInspection(event) {
+    if (state.mode !== 'quality' || $('quality-display').value !== 'seamless' || !state.qualityData) return;
+    const cells = (state.qualityData.surfaces || []).flatMap(surface => surface.cells || []);
+    let nearest = null, distance = Infinity;
+    for (const cell of cells.length ? cells : (state.qualityData.cells || [])) {
+      if (!cell.center) continue;
+      const pixels = state.map.latLngToContainerPoint(cell.center);
+      const clicked = state.map.latLngToContainerPoint(event.latlng);
+      const candidate = pixels.distanceTo(clicked);
+      if (candidate < distance) { distance = candidate; nearest = cell; }
+    }
+    if (nearest && distance <= 180) L.popup().setLatLng(event.latlng)
+      .setContent(qualityPopup(nearest)).openOn(state.map);
+  }
+
   async function loadQuality(allowLarge = false) {
     const requestId = ++state.requestSeq.quality;
     const from = new Date($('quality-from').value).getTime();
@@ -1541,11 +1855,18 @@
       return;
     }
     const bounds = state.map.getBounds();
+    updateQualityControls();
     const params = new URLSearchParams({
       from_ms: String(from), to_ms: String(to),
       resolution: String(h3ResolutionForZoom(state.map.getZoom())),
       bounds: [bounds.getSouth(), bounds.getWest(), bounds.getNorth(), bounds.getEast()].join(','),
+      display: $('quality-display').value,
+      station_mode: $('quality-station-mode').value,
+      metric: $('quality-layer').value,
+      value_mode: $('quality-values').value,
     });
+    const area = qualityAreaPolygon();
+    if (area && $('quality-display').value === 'seamless') params.set('area', JSON.stringify(area));
     const vehicles = selectedOptions('quality-vehicles');
     const stations = selectedOptions('quality-stations');
     if (vehicles.length) params.set('vehicles', vehicles.join(','));
@@ -1556,31 +1877,10 @@
     try {
       const data = await fetchJSON('/api/wifi-quality?' + params);
       if (requestId !== state.requestSeq.quality || state.mode !== 'quality') return;
-      state.qualityLayer.clearLayers();
-      const selectedLayer = $('quality-layer').value;
-      for (const cell of data.cells || []) {
-        if ($('quality-hide-low').checked && (cell.confidence || 0) < .5) continue;
-        const displayScore = selectedLayer === 'composite'
-          ? cell.score : cell.metrics?.[selectedLayer]?.score;
-        const polygon = L.polygon(cell.boundary, {
-          color: qualityColor(displayScore), fillColor: qualityColor(displayScore),
-          fillOpacity: Math.max(.18, .72 * (cell.confidence || 0)), weight: 1,
-        });
-        const metrics = Object.entries(cell.metrics || {}).map(([k,v]) =>
-          `${esc(k)}: ${v.value == null ? '—' : esc(v.value)} (${v.score == null ? '—' : esc(v.score)})`
-        ).join('<br>');
-        polygon.bindPopup(`<strong>${esc(selectedLayer)} ${displayScore ?? '—'}</strong>
-          <br>Composite ${cell.score ?? '—'}<br>Samples ${cell.sample_count}
-          <br>Vehicles: ${(cell.vehicles || []).map(esc).join(', ') || '—'}
-          <br>BSSIDs: ${(cell.bssids || []).map(esc).join(', ') || '—'}<br>${metrics}`);
-        polygon.addTo(state.qualityLayer);
-      }
-      const s = data.summary || {};
-      $('quality-summary').innerHTML = `<div>Combined score</div><strong>${s.score ?? '—'}</strong>
-        <div>Samples ${Number(s.samples || 0).toLocaleString()}</div>
-        <div>Cells ${s.cells || 0} · Roams ${s.roams || 0}</div>
-        <div>Confidence ${s.confidence || 0}%</div>`;
-      $('quality-warning').textContent = data.warning || (data.cells?.length ? '' : 'No data in this viewport.');
+      renderQuality(data);
+      const hasData = (data.cells?.length || 0) + (data.surfaces || [])
+        .reduce((total, surface) => total + (surface.cells?.length || 0), 0);
+      $('quality-warning').textContent = data.warning || (hasData ? '' : 'No data in this area.');
     } catch (e) {
       if (requestId !== state.requestSeq.quality) return;
       if (String(e.message).includes('requires_override')) {
@@ -1604,19 +1904,19 @@
     if (mode === 'quality') url.searchParams.set('mode', 'quality'); else url.searchParams.delete('mode');
     history.replaceState(null, '', url);
     if (mode === 'quality') {
-      setLegend(true);
       state.map.removeLayer(state.pathLayer);
       state.map.removeLayer(state.roamLayer);
       if (state.marker) { state.map.removeLayer(state.marker); state.marker = null; }
       state.qualityLayer.addTo(state.map);
       loadQualityMetadata().then(() => loadQuality());
     } else {
-      setLegend(false);
+      clearQualityLayers();
       state.map.removeLayer(state.qualityLayer);
       if (state.layers.path) state.pathLayer.addTo(state.map);
       if (state.layers.roam) state.roamLayer.addTo(state.map);
       renderTrack();
     }
+    updateQualityControls();
     invalidateMap();
   }
 
@@ -1696,7 +1996,16 @@
     $('mode-quality').onclick = () => setMode('quality');
     $('quality-apply').onclick = () => loadQuality();
     $('quality-layer').onchange = () => loadQuality();
+    $('quality-display').onchange = () => { updateQualityControls(); loadQuality(); };
+    $('quality-values').onchange = () => loadQuality();
+    $('quality-station-mode').onchange = () => loadQuality();
     $('quality-hide-low').onchange = () => loadQuality();
+    $('quality-area-clear').onclick = () => {
+      state.qualityAreaLayer.clearLayers();
+      $('quality-area-state').textContent = 'Using current viewport';
+      loadQuality();
+    };
+    state.map.on('click', showQualityInspection);
     $('open-catalog').onclick = () => { openDrawer('catalog-drawer'); loadQualityMetadata(); };
     $('open-profiles').onclick = () => { openDrawer('profiles-drawer'); loadQualityMetadata(); };
     document.querySelectorAll('[data-close]').forEach(b => b.onclick = () => closeDrawer(b.dataset.close));
