@@ -14,6 +14,7 @@ from typing import Any, Iterable, Optional
 
 DEFAULT_PROFILE = {
     "name": "Operational default",
+    "h3_resolution": 9,
     "metrics": {
         "rssi": {"enabled": True, "weight": 40, "poor": -90, "good": -55},
         "latency": {"enabled": True, "weight": 25, "poor": 300, "good": 30},
@@ -275,6 +276,17 @@ class MetadataStore:
             raise ValueError("Profile name and metrics are required")
         if len(name) > 120:
             raise ValueError("Profile name is too long")
+        h3_resolution = definition.get("h3_resolution")
+        if h3_resolution not in (None, "", "auto"):
+            try:
+                h3_resolution = int(h3_resolution)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Hex resolution must be auto or an integer from 4 to 11") from exc
+            if not 4 <= h3_resolution <= 11:
+                raise ValueError("Hex resolution must be between 4 and 11")
+            definition["h3_resolution"] = h3_resolution
+        else:
+            definition["h3_resolution"] = None
         known = {"rssi", "latency", "rate", "beacon_loss", "roaming"}
         enabled_weight = 0.0
         for key, metric in definition["metrics"].items():

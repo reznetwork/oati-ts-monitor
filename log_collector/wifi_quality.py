@@ -108,7 +108,7 @@ class WiFiQualityService:
         vehicles: Sequence[str] = (),
         station_ids: Sequence[int] = (),
         profile_id: Optional[int] = None,
-        resolution: int = 9,
+        resolution: Optional[int] = None,
         bounds: Optional[Sequence[float]] = None,
         allow_large_range: bool = False,
     ) -> dict[str, Any]:
@@ -127,11 +127,16 @@ class WiFiQualityService:
                     bssids.extend(item["bssid"] for item in station["bssids"])
             if not bssids:
                 return {"cells": [], "summary": self._summary([]), "warning": None}
+        definition = self.profile(profile_id)
+        profile_resolution = definition.get("h3_resolution", 9)
+        if profile_resolution is not None:
+            resolution = int(profile_resolution)
+        if resolution is None:
+            resolution = 9
         raw = self.clickhouse.wifi_quality_cells(
             from_ms=from_ms, to_ms=to_ms, vehicles=vehicles, bssids=bssids,
             resolution=resolution, bounds=bounds,
         )
-        definition = self.profile(profile_id)
         cells = [score_cell(cell, definition) for cell in raw]
         warning = (
             f"Large {days:.1f}-day query exceeds the configured {self.max_days}-day range"

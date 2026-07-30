@@ -103,7 +103,11 @@ class TestMetadataStore(unittest.TestCase):
 
 
 class FakeClickHouse:
+    def __init__(self):
+        self.last_query = None
+
     def wifi_quality_cells(self, **kwargs):
+        self.last_query = kwargs
         return []
 
     def discovered_bssids(self):
@@ -120,6 +124,24 @@ class TestRangeGuard(unittest.TestCase):
                 from_ms=0, to_ms=91 * 86_400_000, allow_large_range=True
             )
             self.assertIn("Large", result["warning"])
+
+    def test_profile_presets_h3_resolution(self):
+        with tempfile.TemporaryDirectory() as td:
+            metadata = MetadataStore(f"{td}/m.db")
+            definition = {
+                **DEFAULT_PROFILE,
+                "name": "Small cells",
+                "h3_resolution": 11,
+            }
+            profile = metadata.save_profile(definition)
+            clickhouse = FakeClickHouse()
+            service = WiFiQualityService(clickhouse, metadata)
+            service.heatmap(
+                from_ms=0, to_ms=86_400_000, profile_id=profile["id"], resolution=6
+            )
+            self.assertEqual(clickhouse.last_query["resolution"], 11)
+            with self.assertRaises(ValueError):
+                metadata.save_profile({**definition, "name": "Invalid", "h3_resolution": 12})
 
 
 class TestAuthentication(unittest.IsolatedAsyncioTestCase):

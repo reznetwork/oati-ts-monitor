@@ -267,6 +267,10 @@
   .drawer-backdrop.open { display:block; }
   .drawer { position:absolute; right:0; top:0; bottom:0; width:min(760px,95vw); overflow:auto;
     background:var(--surface); border-left:1px solid var(--border-strong); padding:18px; }
+  #profiles-drawer .drawer { width:min(1120px,98vw); }
+  #profiles-drawer .drawer-grid { grid-template-columns:minmax(240px, .7fr) minmax(640px, 2fr); }
+  #profiles-drawer form { min-width:0; overflow-x:auto; }
+  #profiles-drawer .profile-metrics { min-width:720px; }
   .drawer-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; }
   .drawer-grid { display:grid; grid-template-columns:minmax(220px,1fr) minmax(280px,1.4fr); gap:12px; }
   .drawer-list { border:1px solid var(--border); border-radius:7px; overflow:auto; max-height:65vh; }
@@ -277,7 +281,11 @@
   .profile-metrics th,.profile-metrics td { border-bottom:1px solid var(--border); padding:6px; text-align:left; }
   .profile-metrics input[type=number] { min-width:65px; width:80px; }
   .notice { color:var(--warning); font-size:12px; }
-  @media(max-width:700px){.drawer-grid{grid-template-columns:1fr}.app-header .meta{display:none}}
+  @media(max-width:800px){
+    .drawer-grid,#profiles-drawer .drawer-grid{grid-template-columns:1fr}
+    #profiles-drawer .profile-metrics{min-width:650px}
+    .app-header .meta{display:none}
+  }
 </style>
 </head>
 <body>
@@ -420,6 +428,17 @@
       <form id="profile-form">
         <input type="hidden" id="profile-id">
         <div class="form-row"><label>Name</label><input id="profile-name" required></div>
+        <div class="form-row"><label>Hex size</label><select id="profile-h3-resolution">
+          <option value="auto">Automatic by map zoom</option>
+          <option value="4">H3 4 · ~22 km edge</option>
+          <option value="5">H3 5 · ~8.5 km edge</option>
+          <option value="6">H3 6 · ~3.2 km edge</option>
+          <option value="7">H3 7 · ~1.2 km edge</option>
+          <option value="8">H3 8 · ~460 m edge</option>
+          <option value="9">H3 9 · ~174 m edge</option>
+          <option value="10">H3 10 · ~66 m edge</option>
+          <option value="11">H3 11 · ~25 m edge</option>
+        </select></div>
         <table class="profile-metrics"><thead><tr><th>Metric</th><th>On</th><th>Weight</th><th>Poor</th><th>Good</th></tr></thead>
           <tbody id="profile-metric-rows"></tbody></table>
         <div id="profile-preview" class="notice">Missing metrics are excluded and available weights are renormalized.</div>
@@ -1658,6 +1677,8 @@
     if (!p) return;
     $('profile-id').value = p.id;
     $('profile-name').value = p.name;
+    $('profile-h3-resolution').value = p.definition.h3_resolution === null
+      ? 'auto' : String(p.definition.h3_resolution ?? 9);
     const metrics = p.definition.metrics || {};
     $('profile-metric-rows').innerHTML = Object.entries(metricLabels).map(([key,label]) => {
       const m = metrics[key] || {enabled:true,weight:0,poor:0,good:100};
@@ -1726,7 +1747,12 @@
       });
       const id = $('profile-id').value;
       await fetchJSON('/api/quality-profiles' + (id ? '/' + id : ''), {
-        method:id?'PATCH':'POST',body:{name:$('profile-name').value,metrics,missing:'renormalize'}
+        method:id?'PATCH':'POST',body:{
+          name:$('profile-name').value,
+          h3_resolution:$('profile-h3-resolution').value === 'auto'
+            ? null : Number($('profile-h3-resolution').value),
+          metrics,missing:'renormalize'
+        }
       });
       await loadQualityMetadata();
     };
