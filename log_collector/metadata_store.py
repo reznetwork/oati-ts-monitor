@@ -281,9 +281,9 @@ class MetadataStore:
             try:
                 h3_resolution = int(h3_resolution)
             except (TypeError, ValueError) as exc:
-                raise ValueError("Hex resolution must be auto or an integer from 4 to 11") from exc
-            if not 4 <= h3_resolution <= 11:
-                raise ValueError("Hex resolution must be between 4 and 11")
+                raise ValueError("Hex resolution must be auto or an integer from 4 to 13") from exc
+            if not 4 <= h3_resolution <= 13:
+                raise ValueError("Hex resolution must be between 4 and 13")
             definition["h3_resolution"] = h3_resolution
         else:
             definition["h3_resolution"] = None

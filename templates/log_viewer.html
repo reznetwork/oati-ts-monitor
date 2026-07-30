@@ -438,6 +438,8 @@
           <option value="9">H3 9 · ~174 m edge</option>
           <option value="10">H3 10 · ~66 m edge</option>
           <option value="11">H3 11 · ~25 m edge</option>
+          <option value="12">H3 12 · ~9 m edge</option>
+          <option value="13">H3 13 · ~3.5 m edge</option>
         </select></div>
         <table class="profile-metrics"><thead><tr><th>Metric</th><th>On</th><th>Weight</th><th>Poor</th><th>Good</th></tr></thead>
           <tbody id="profile-metric-rows"></tbody></table>
@@ -1513,7 +1515,7 @@
   }
 
   function h3ResolutionForZoom(zoom) {
-    return Math.max(4, Math.min(11, Math.round((zoom || 12) / 2 + 4)));
+    return Math.max(4, Math.min(13, Math.round((zoom || 12) / 2 + 4)));
   }
 
   async function loadQualityMetadata() {

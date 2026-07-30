@@ -135,6 +135,42 @@ def _ddl_statements(database: str, *, modern_h3_order: bool = True) -> tuple[str
         ) ENGINE = ReplacingMergeTree(ingested_at)
         ORDER BY (device_id, vehicle_short, segment, bucket_ms, h3_11, bssid)
         """,
+        f"""
+        CREATE TABLE IF NOT EXISTS {db}.wifi_quality_rollups_v2 (
+            device_id String,
+            segment String,
+            bucket_ms Int64,
+            h3_13 UInt64,
+            vehicle_short String,
+            bssid String,
+            sample_count UInt64,
+            rssi_sum Float64,
+            rssi_count UInt64,
+            latency_sum Float64,
+            latency_count UInt64,
+            gateway_ok_sum UInt64,
+            gateway_ok_count UInt64,
+            link_rate_sum Float64,
+            link_rate_count UInt64,
+            traffic_rate_sum Float64,
+            traffic_rate_count UInt64,
+            beacon_loss_sum Float64,
+            beacon_loss_count UInt64,
+            roam_count UInt64,
+            ingested_at DateTime64(3) DEFAULT now64(3)
+        ) ENGINE = ReplacingMergeTree(ingested_at)
+        ORDER BY (device_id, vehicle_short, segment, bucket_ms, h3_13, bssid)
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS {db}.wifi_quality_v2_ingested_segments (
+            device_id String,
+            vehicle_short String,
+            segment String,
+            sample_count UInt64,
+            ingested_at DateTime64(3) DEFAULT now64(3)
+        ) ENGINE = ReplacingMergeTree(ingested_at)
+        ORDER BY (device_id, vehicle_short, segment)
+        """,
     )
 
 
@@ -336,14 +372,14 @@ class ClickHouseStore:
     ) -> None:
         """Insert a deterministic, replaceable rollup for one source segment."""
         h3_expression = (
-            "geoToH3(lat, lon, 11)" if self._modern_h3_order
-            else "geoToH3(lon, lat, 11)"
+            "geoToH3(lat, lon, 13)" if self._modern_h3_order
+            else "geoToH3(lon, lat, 13)"
         )
         self._require().command(
             f"""
-            INSERT INTO {self.config.database}.wifi_quality_rollups
+            INSERT INTO {self.config.database}.wifi_quality_rollups_v2
             (
-                device_id,segment,bucket_ms,h3_11,vehicle_short,bssid,
+                device_id,segment,bucket_ms,h3_13,vehicle_short,bssid,
                 sample_count,rssi_sum,rssi_count,latency_sum,latency_count,
                 gateway_ok_sum,gateway_ok_count,link_rate_sum,link_rate_count,
                 traffic_rate_sum,traffic_rate_count,beacon_loss_sum,
@@ -353,7 +389,7 @@ class ClickHouseStore:
                 device_id,
                 segment,
                 intDiv(ts_ms,300000)*300000 AS bucket_ms,
-                {h3_expression} AS h3_11,
+                {h3_expression} AS h3_13,
                 vehicle_short,bssid,countIf(roam_count=0),
                 sum(ifNull(rssi_dbm,0.0)),count(rssi_dbm),
                 sum(ifNull(gateway_latency_ms,0.0)),count(gateway_latency_ms),
@@ -368,7 +404,7 @@ class ClickHouseStore:
             WHERE device_id={{device_id:String}}
               AND vehicle_short={{vehicle_short:String}}
               AND segment={{segment:String}}
-            GROUP BY device_id,segment,bucket_ms,h3_11,vehicle_short,bssid
+            GROUP BY device_id,segment,bucket_ms,h3_13,vehicle_short,bssid
             """,
             parameters={
                 "device_id": device_id, "vehicle_short": vehicle_short, "segment": segment
@@ -380,7 +416,7 @@ class ClickHouseStore:
     ) -> bool:
         result = self._require().query(
             f"""
-            SELECT count() FROM {self.config.database}.wifi_quality_ingested_segments FINAL
+            SELECT count() FROM {self.config.database}.wifi_quality_v2_ingested_segments FINAL
             WHERE device_id={{device_id:String}} AND vehicle_short={{vehicle_short:String}}
               AND segment={{segment:String}}
             """,
@@ -394,7 +430,7 @@ class ClickHouseStore:
         self, device_id: str, vehicle_short: str, segment: str, sample_count: int
     ) -> None:
         self._require().insert(
-            "wifi_quality_ingested_segments",
+            "wifi_quality_v2_ingested_segments",
             [[device_id, vehicle_short, segment, int(sample_count)]],
             column_names=["device_id", "vehicle_short", "segment", "sample_count"],
             database=self.config.database,
@@ -660,7 +696,7 @@ class ClickHouseStore:
     ) -> List[dict]:
         """Aggregate normalized metric states into viewport-aware H3 cells."""
         client = self._require()
-        resolution = max(4, min(11, int(resolution)))
+        resolution = max(4, min(13, int(resolution)))
         where = [
             "bucket_ms >= {from_ms:Int64}",
             "bucket_ms <= {to_ms:Int64}",
@@ -678,14 +714,14 @@ class ClickHouseStore:
             # Filter by the center of the fine-resolution source cell.
             lat_index, lon_index = ((1, 2) if self._modern_h3_geo_order else (2, 1))
             where.extend([
-                f"tupleElement(h3ToGeo(h3_11), {lat_index}) BETWEEN {{south:Float64}} AND {{north:Float64}}",
-                f"tupleElement(h3ToGeo(h3_11), {lon_index}) BETWEEN {{west:Float64}} AND {{east:Float64}}",
+                f"tupleElement(h3ToGeo(h3_13), {lat_index}) BETWEEN {{south:Float64}} AND {{north:Float64}}",
+                f"tupleElement(h3ToGeo(h3_13), {lon_index}) BETWEEN {{west:Float64}} AND {{east:Float64}}",
             ])
             params.update({"south": south, "west": west, "north": north, "east": east})
         result = client.query(
             f"""
             SELECT
-                h3ToParent(h3_11, {{resolution:UInt8}}) AS cell,
+                h3ToParent(h3_13, {{resolution:UInt8}}) AS cell,
                 h3ToGeoBoundary(cell) AS boundary,
                 groupUniqArray(20)(vehicle_short) AS vehicles,
                 groupUniqArray(20)(bssid) AS bssids,
@@ -695,7 +731,7 @@ class ClickHouseStore:
                 sum(link_rate_sum), sum(link_rate_count),
                 sum(traffic_rate_sum), sum(traffic_rate_count),
                 sum(beacon_loss_sum), sum(beacon_loss_count), sum(roam_count)
-            FROM {self.config.database}.wifi_quality_rollups FINAL
+            FROM {self.config.database}.wifi_quality_rollups_v2 FINAL
             WHERE {' AND '.join(where)}
             GROUP BY cell
             ORDER BY sum(sample_count) DESC

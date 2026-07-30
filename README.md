@@ -207,7 +207,9 @@ The collector listens at `http://<host>:9000/ingest` and shows its dashboard at 
 - **Wi-Fi Quality** aggregates selected vehicles/base stations into zoom-aware H3 cells and scores RSSI, gateway availability/latency, traffic or link rate, beacon loss, and roaming.
 
 Each quality profile can use automatic zoom-based H3 sizing or pin a fixed H3
-resolution from 4 (large regional cells) through 11 (approximately 25 m edges).
+resolution from 4 (large regional cells) through 13 (approximately 3.5 m edges).
+Upgrading from the original H3-11 analyzer schema creates a versioned H3-13
+rollup; rerun backfill so retained segments populate the finer cells.
 
 The default analysis warning threshold is 90 days. An operator can explicitly run a
 larger request after acknowledging the warning. Map requests are also bounded by the

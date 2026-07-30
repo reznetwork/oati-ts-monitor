@@ -30,7 +30,7 @@ class TestWifiQualityDerivation(unittest.TestCase):
         store._require = lambda: client
         store.rebuild_quality_segment_rollup("device", "vehicle", "segment")
         self.assertIn("AS bucket_ms", client.sql)
-        self.assertIn("AS h3_11", client.sql)
+        self.assertIn("AS h3_13", client.sql)
 
     def test_counter_rates_and_reset_handling(self):
         def event(ts, tx, rx):
@@ -131,7 +131,7 @@ class TestRangeGuard(unittest.TestCase):
             definition = {
                 **DEFAULT_PROFILE,
                 "name": "Small cells",
-                "h3_resolution": 11,
+                "h3_resolution": 13,
             }
             profile = metadata.save_profile(definition)
             clickhouse = FakeClickHouse()
@@ -139,9 +139,9 @@ class TestRangeGuard(unittest.TestCase):
             service.heatmap(
                 from_ms=0, to_ms=86_400_000, profile_id=profile["id"], resolution=6
             )
-            self.assertEqual(clickhouse.last_query["resolution"], 11)
+            self.assertEqual(clickhouse.last_query["resolution"], 13)
             with self.assertRaises(ValueError):
-                metadata.save_profile({**definition, "name": "Invalid", "h3_resolution": 12})
+                metadata.save_profile({**definition, "name": "Invalid", "h3_resolution": 14})
 
 
 class TestAuthentication(unittest.IsolatedAsyncioTestCase):
