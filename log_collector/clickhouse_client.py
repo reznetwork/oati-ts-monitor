@@ -28,6 +28,41 @@ def _validate_db_name(name: str) -> str:
     return db
 
 
+def _h3_lat_lon(point: Any, *, modern_geo_order: bool = True) -> list[float]:
+    """Normalize an H3 geo point to ``[lat, lon]`` for Leaflet.
+
+    clickhouse-connect returns unnamed tuples as sequences, but named
+    ``Tuple(lat Float64, lon Float64)`` values deserialize as dicts by default.
+    Accessing ``point[0]`` on those dicts raises ``KeyError(0)``, which the API
+    surfaces as the opaque HTTP body ``400: 0``.
+    """
+    if point is None:
+        raise ValueError("H3 geo point is missing")
+    if isinstance(point, dict):
+        for lat_key, lon_key in (("lat", "lon"), ("latitude", "longitude")):
+            if lat_key in point and lon_key in point:
+                return [float(point[lat_key]), float(point[lon_key])]
+        if 0 in point and 1 in point:
+            first, second = float(point[0]), float(point[1])
+        elif 1 in point and 2 in point:
+            first, second = float(point[1]), float(point[2])
+        elif "1" in point and "2" in point:
+            first, second = float(point["1"]), float(point["2"])
+        else:
+            values = [float(v) for v in point.values()]
+            if len(values) < 2:
+                raise ValueError(f"Invalid H3 geo point: {point!r}")
+            first, second = values[0], values[1]
+    else:
+        try:
+            first, second = float(point[0]), float(point[1])
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid H3 geo point: {point!r}") from exc
+    if modern_geo_order:
+        return [first, second]
+    return [second, first]
+
+
 def _ddl_statements(database: str, *, modern_h3_order: bool = True) -> tuple[str, ...]:
     """DDL with fully-qualified table names (HTTP has no persistent USE session)."""
     db = _validate_db_name(database)
@@ -240,12 +275,15 @@ class ClickHouseStore:
 
     def _new_client(self, *, database: str):
         assert self._connect is not None
+        # Force Tuple values to sequences. Named tuples otherwise deserialize as
+        # dicts and break ``point[0]`` access used throughout geo parsing.
         return self._connect.get_client(
             host=self.config.host,
             port=self.config.port,
             username=self.config.username,
             password=self.config.password,
             database=database,
+            query_formats={"Tuple": "tuple"},
         )
 
     def _thread_client(self):
@@ -752,16 +790,19 @@ class ClickHouseStore:
         )
         out: List[dict] = []
         for row in result.result_rows:
-            boundary = [[float(p[0]), float(p[1])] for p in (row[1] or [])]
-            center = row[2] or (0, 0)
-            center_lat, center_lon = (
-                (float(center[0]), float(center[1]))
-                if self._modern_h3_geo_order
-                else (float(center[1]), float(center[0]))
+            # h3ToGeoBoundary is documented as (lat, lon) on all supported versions.
+            # h3ToGeo center order flipped in 25.1 — see _modern_h3_geo_order.
+            boundary = [
+                _h3_lat_lon(point, modern_geo_order=True)
+                for point in (row[1] or [])
+            ]
+            center = _h3_lat_lon(
+                row[2] if row[2] is not None else (0, 0),
+                modern_geo_order=self._modern_h3_geo_order,
             )
             item = {
                 "cell": str(row[0]), "boundary": boundary,
-                "center": [center_lat, center_lon],
+                "center": center,
                 "vehicles": [str(v) for v in (row[3] or [])],
                 "bssids": [str(v) for v in (row[4] or [])],
             }

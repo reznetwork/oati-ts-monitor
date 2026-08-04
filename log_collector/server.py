@@ -377,7 +377,10 @@ async def handle_wifi_quality(request: web.Request) -> web.Response:
     except OverflowError as exc:
         return _json({"error": str(exc), "requires_override": True}, status=422)
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
-        raise web.HTTPBadRequest(reason=str(exc)) from exc
+        reason = str(exc)
+        if isinstance(exc, KeyError):
+            reason = f"Missing or invalid field: {exc.args[0]!r}" if exc.args else "Missing field"
+        raise web.HTTPBadRequest(reason=reason) from exc
     return _json(result)
 
 

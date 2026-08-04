@@ -32,6 +32,32 @@ class TestWifiQualityDerivation(unittest.TestCase):
         self.assertIn("AS bucket_ms", client.sql)
         self.assertIn("AS h3_13", client.sql)
 
+    def test_quality_query_accepts_dict_geo_points(self):
+        """Named ClickHouse tuples deserialize as dicts and used to yield HTTP 400: 0."""
+        class Result:
+            result_rows = [[
+                123,
+                [{"lat": 1.0, "lon": 2.0}, {"latitude": 1.1, "longitude": 2.1}],
+                {"lat": 1.05, "lon": 2.05},
+                ["v1"],
+                ["aa:bb:cc:dd:ee:ff"],
+                *([1] * 14),
+            ]]
+
+        class Client:
+            def query(self, sql, parameters=None):
+                return Result()
+
+        store = ClickHouseStore.__new__(ClickHouseStore)
+        store.config = ClickHouseConfig(database="logs")
+        store._modern_h3_geo_order = True
+        store._require = lambda: Client()
+        cells = store.wifi_quality_cells(
+            from_ms=0, to_ms=1, vehicles=[], bssids=[], resolution=9,
+        )
+        self.assertEqual(cells[0]["center"], [1.05, 2.05])
+        self.assertEqual(cells[0]["boundary"], [[1.0, 2.0], [1.1, 2.1]])
+
     def test_quality_query_can_group_by_bssid_and_returns_centers(self):
         class Result:
             result_rows = [[

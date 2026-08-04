@@ -1,0 +1,109 @@
+# Deploy log_collector to the server when its package changes.
+#
+# Required repository secrets:
+#   LOG_COLLECTOR_HOST     – server hostname or IP
+#   LOG_COLLECTOR_USER     – SSH user
+#   LOG_COLLECTOR_SSH_KEY  – private key for that user
+#
+# Optional repository secrets / variables:
+#   LOG_COLLECTOR_SSH_PORT – SSH port (default: 22)
+#   LOG_COLLECTOR_PATH     – remote install root (default: /opt/oati-ts-monitor)
+#   LOG_COLLECTOR_SERVICE  – systemd unit (default: log_collector.service)
+
+name: Deploy log_collector
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "log_collector/**"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-log-collector
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.LOG_COLLECTOR_SSH_KEY }}
+          SSH_HOST: ${{ secrets.LOG_COLLECTOR_HOST }}
+          SSH_USER: ${{ secrets.LOG_COLLECTOR_USER }}
+          SSH_PORT: ${{ secrets.LOG_COLLECTOR_SSH_PORT || vars.LOG_COLLECTOR_SSH_PORT || '22' }}
+        run: |
+          set -euo pipefail
+          test -n "${SSH_KEY}" || { echo "Missing secret LOG_COLLECTOR_SSH_KEY"; exit 1; }
+          test -n "${SSH_HOST}" || { echo "Missing secret LOG_COLLECTOR_HOST"; exit 1; }
+          test -n "${SSH_USER}" || { echo "Missing secret LOG_COLLECTOR_USER"; exit 1; }
+
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${SSH_KEY}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+          ssh-keyscan -p "${SSH_PORT}" -H "${SSH_HOST}" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+          cat > ~/.ssh/config <<EOF
+Host log-collector-deploy
+  HostName ${SSH_HOST}
+  User ${SSH_USER}
+  Port ${SSH_PORT}
+  IdentityFile ~/.ssh/deploy_key
+  IdentitiesOnly yes
+  StrictHostKeyChecking accept-new
+EOF
+          chmod 600 ~/.ssh/config
+
+      - name: Sync log_collector to server
+        env:
+          REMOTE_PATH: ${{ secrets.LOG_COLLECTOR_PATH || vars.LOG_COLLECTOR_PATH || '/opt/oati-ts-monitor' }}
+        run: |
+          set -euo pipefail
+
+          ssh log-collector-deploy "mkdir -p '${REMOTE_PATH}/log_collector' '${REMOTE_PATH}/templates'"
+
+          # Package code (path filter ensures this job only runs for log_collector changes).
+          rsync -az --delete \
+            --exclude '__pycache__/' \
+            --exclude '*.pyc' \
+            --exclude '.pytest_cache/' \
+            ./log_collector/ \
+            "log-collector-deploy:${REMOTE_PATH}/log_collector/"
+
+          # Runtime siblings required by python -m log_collector from WorkingDirectory.
+          rsync -az ./http_header_text.py "log-collector-deploy:${REMOTE_PATH}/http_header_text.py"
+          rsync -az ./templates/log_viewer.html "log-collector-deploy:${REMOTE_PATH}/templates/log_viewer.html"
+
+      - name: Install dependencies and restart service
+        env:
+          REMOTE_PATH: ${{ secrets.LOG_COLLECTOR_PATH || vars.LOG_COLLECTOR_PATH || '/opt/oati-ts-monitor' }}
+          SERVICE_NAME: ${{ secrets.LOG_COLLECTOR_SERVICE || vars.LOG_COLLECTOR_SERVICE || 'log_collector.service' }}
+        run: |
+          set -euo pipefail
+
+          ssh log-collector-deploy bash -s <<EOF
+          set -euo pipefail
+          cd '${REMOTE_PATH}'
+
+          if ! python3 -m pip install --upgrade -r log_collector/requirements.txt; then
+            python3 -m pip install --upgrade --break-system-packages -r log_collector/requirements.txt
+          fi
+
+          if ! command -v systemctl >/dev/null 2>&1; then
+            echo "systemctl not available; files synced but service was not restarted."
+            exit 1
+          fi
+
+          if ! sudo -n systemctl restart '${SERVICE_NAME}'; then
+            echo "Could not restart ${SERVICE_NAME} (need passwordless sudo for systemctl)."
+            exit 1
+          fi
+          sudo -n systemctl --no-pager --full status '${SERVICE_NAME}' || true
+          EOF
