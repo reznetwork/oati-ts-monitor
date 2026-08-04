@@ -2110,7 +2110,9 @@
     } catch (e) {
       $('header-meta').textContent = 'ClickHouse API unavailable: ' + e.message;
       $('dash-body').innerHTML = `<div class="empty-msg">${esc(e.message)}<br>
-        Start collector with --clickhouse and ensure ClickHouse is running.</div>`;
+        Enable <code>clickhouse.enabled</code> in the collector config (or pass
+        <code>--clickhouse</code>), install <code>clickhouse-connect</code>, and ensure
+        ClickHouse is reachable.</div>`;
     }
   }
 

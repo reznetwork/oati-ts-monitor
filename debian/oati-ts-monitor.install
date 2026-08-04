@@ -12,6 +12,7 @@ wifilog_viewer usr/lib/oati-ts-monitor/
 passthrough_viewer usr/lib/oati-ts-monitor/
 passthrough_map.xlsx usr/lib/oati-ts-monitor/
 monitor_config_example.json etc/oati-ts-monitor/monitor_config.json
+log_collector_config_example.json etc/oati-ts-monitor/log_collector_config.json
 log_collector_config_example.json usr/share/doc/oati-ts-monitor/examples/
 README.md usr/share/doc/oati-ts-monitor/
 README_wifilog_viewer.md usr/share/doc/oati-ts-monitor/

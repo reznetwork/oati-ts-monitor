@@ -148,6 +148,17 @@ def main(argv: list[str] | None = None) -> int:
         password=cfg.clickhouse_password,
     )
     ch_store = try_create_store(ch_config)
+    if cfg.clickhouse_enabled and ch_store is None:
+        logging.error(
+            "ClickHouse is enabled in config but unavailable "
+            "(check host/credentials and that clickhouse-connect is installed)"
+        )
+    elif not cfg.clickhouse_enabled:
+        logging.warning(
+            "ClickHouse is disabled — /viewer historical and Wi-Fi quality APIs "
+            "will return 503. Set clickhouse.enabled=true in %s or pass --clickhouse",
+            cfg.config_path or DEFAULT_CONFIG_PATH,
+        )
     metadata = MetadataStore(cfg.metadata_db)
     if cfg.auth_enabled and not cfg.admin_password_hash:
         logging.error("auth.enabled=true requires auth.passwordHash")

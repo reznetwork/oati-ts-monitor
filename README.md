@@ -179,12 +179,21 @@ Run the collector directly from a checkout:
 
 ```bash
 python3 -m pip install -r log_collector/requirements.txt
-python3 -m log_collector --bind 0.0.0.0 --port 9000 --data-dir ./received_logs
+cp log_collector_config_example.json log_collector_config.json   # edit clickhouse.*
+python3 -m log_collector --config log_collector_config.json
 ```
 
-With the Debian package installed, run it with systemd:
+Historical `/viewer` APIs (timeline + Wi-Fi quality) require ClickHouse:
+set `clickhouse.enabled` to `true` in the JSON config (or pass `--clickhouse`) and
+install `clickhouse-connect` from `log_collector/requirements.txt`.
+
+With the Debian package installed, place config at
+`/etc/oati-ts-monitor/log_collector_config.json` and run systemd:
 
 ```bash
+sudo cp /usr/share/doc/oati-ts-monitor/examples/log_collector_config_example.json \
+  /etc/oati-ts-monitor/log_collector_config.json
+# edit clickhouse host/credentials, then:
 sudo systemctl enable --now oati-ts-monitor-log-collector.service
 journalctl -u oati-ts-monitor-log-collector.service -f
 ```

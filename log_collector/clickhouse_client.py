@@ -275,15 +275,15 @@ class ClickHouseStore:
 
     def _new_client(self, *, database: str):
         assert self._connect is not None
-        # Force Tuple values to sequences. Named tuples otherwise deserialize as
-        # dicts and break ``point[0]`` access used throughout geo parsing.
+        # Do not pass query_formats here: older clickhouse-connect builds reject it
+        # on get_client()/HttpClient.__init__. Named-tuple dicts are handled by
+        # _h3_lat_lon when parsing geo columns.
         return self._connect.get_client(
             host=self.config.host,
             port=self.config.port,
             username=self.config.username,
             password=self.config.password,
             database=database,
-            query_formats={"Tuple": "tuple"},
         )
 
     def _thread_client(self):

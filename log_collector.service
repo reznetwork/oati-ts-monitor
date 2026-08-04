@@ -6,7 +6,11 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/oati-ts-monitor
+# ClickHouse / viewer settings come from the JSON config (not CLI defaults).
+# Create it from log_collector_config_example.json if missing and set
+# clickhouse.enabled/host/credentials for your environment.
 ExecStart=/usr/bin/python3 -m log_collector \
+  --config /opt/oati-ts-monitor/log_collector_config.json \
   --bind 0.0.0.0 \
   --port 9000 \
   --data-dir /var/lib/oati-ts-monitor/received_logs
